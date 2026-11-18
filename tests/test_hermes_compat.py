@@ -116,3 +116,11 @@ def test_every_module_level_hermes_import_is_listed():
     assert not unlisted, f"not in compat.IMPORTS: {unlisted}"
 
 
+@requires_hermes
+def test_the_checked_out_hermes_is_compatible():
+    assert compat.missing() == []
+
+
+def test_approval_timeout_falls_back_to_the_default_without_hermes(monkeypatch):
+    monkeypatch.setitem(sys.modules, "gateway.platforms.base_exec_approval", None)  # its import now fails
+    assert compat.approval_timeout_s() == 300

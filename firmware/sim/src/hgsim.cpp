@@ -2,6 +2,7 @@
 #include "hgsim.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -37,10 +38,6 @@ class SimHal final : public hg::Display,
     info_.swap_bytes = false;
     info_.has_backlight = cfg.has_backlight != 0;
     info_.round = cfg.round != 0;
-    if (cfg.round_area_permille > 0) info_.round_area_permille = static_cast<uint16_t>(cfg.round_area_permille);
-    info_.no_bottom_bar = cfg.no_bottom_bar != 0;
-    info_.no_top_band = cfg.no_top_band != 0;
-    info_.body_rows_cap = static_cast<uint8_t>(cfg.body_rows_cap);
   }
 
   // Display
@@ -123,6 +120,21 @@ class SimHal final : public hg::Display,
   }
   void log(hg::LogLevel level, std::string_view message) override {
     if (host_.log) host_.log(host_.user, static_cast<int>(level), std::string(message).c_str());
+  }
+  bool wall_time(hg::WallTime& out) override {
+    hgsim_wall_time w{};
+    if (!host_.wall_time || !host_.wall_time(host_.user, &w)) return false;
+    if (w.month < 1 || w.month > 12 || w.day < 1 || w.day > 31 || w.weekday < 0 || w.weekday > 6 || w.hour < 0 ||
+        w.hour > 23 || w.minute < 0 || w.minute > 59 || w.second < 0 || w.second > 60 || w.year < 1 || w.year > 9999)
+      return false;
+    out.year = static_cast<uint16_t>(w.year);
+    out.month = static_cast<uint8_t>(w.month);
+    out.day = static_cast<uint8_t>(w.day);
+    out.weekday = static_cast<uint8_t>(w.weekday);
+    out.hour = static_cast<uint8_t>(w.hour);
+    out.minute = static_cast<uint8_t>(w.minute);
+    out.second = static_cast<uint8_t>(std::min(w.second, 59));
+    return true;
   }
 
  private:
@@ -230,14 +242,16 @@ hgsim* hgsim_create(const hgsim_config* cfg, const hgsim_host* host) {
   profile.has_scroll_buttons = cfg->has_scroll_buttons != 0;
   profile.talk_label = cfg->talk_label ? cfg->talk_label : "SPACE";
   profile.cancel_label = cfg->cancel_label ? cfg->cancel_label : "ESC";
-  profile.robot_face = cfg->robot_face != 0;
-  profile.emoji_face = cfg->emoji_face != 0;
-  if (cfg->greeting) profile.greeting = cfg->greeting;
+  profile.wake_key = true;  // the keyboard's TALK always reaches App::on_button, and lights a dark screen
+  profile.talk_key = true;  // and talks, so the touchscreen may be left out of talking
   if (cfg->touch) {
     profile.touch_screen = true;
     if (!cfg->cancel_label) profile.cancel_label = "Swipe down";
     profile.extra_settings = {"touch_cancel"};
   }
+  profile.motion_sensor = cfg->motion != 0;
+  profile.colour_face_alloc = std::malloc;
+  profile.recording_alloc = std::malloc;  // like a board with PSRAM: a lost connection keeps the recording
   sim->app = std::make_unique<hg::App>(sim->hal, profile);
   if (cfg->touch) {
     sim->touch = std::make_unique<hg::TouchGestures>(*sim->app);
@@ -301,6 +315,10 @@ void hgsim_button(hgsim* sim, int button, int pressed) {
 }
 void hgsim_touch(hgsim* sim, int touching, int x, int y) {
   if (sim->touch) sim->touch->update(touching != 0, x, y, sim->hal.system->now_ms());
+}
+void hgsim_motion(hgsim* sim, int x_mg, int y_mg, int z_mg) {
+  auto clamp = [](int v) { return static_cast<int16_t>(v < -16000 ? -16000 : v > 16000 ? 16000 : v); };
+  sim->app->on_motion(clamp(x_mg), clamp(y_mg), clamp(z_mg));
 }
 void hgsim_mic_samples(hgsim* sim, const int16_t* samples, size_t count) { sim->app->on_mic_samples(samples, count); }
 void hgsim_submit_text(hgsim* sim, const char* text) { sim->app->submit_text(text ? text : ""); }

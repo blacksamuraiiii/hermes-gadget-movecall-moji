@@ -6,63 +6,77 @@ endif()
 
 set(HG_P4_SOURCES)
 set(HG_P4_REQUIRES)
+set(HG_RGB_REQUIRES)
 if(IDF_TARGET STREQUAL "esp32p4")
     list(APPEND HG_P4_SOURCES
         "port_dsi.cpp"
         "port_audio_p4.cpp"
         "port_power_p4.cpp"
         "../../drivers/stc8_battery.cpp")
-    list(APPEND HG_P4_REQUIRES esp_lcd_ek79007)
-endif()
-set(HG_WAKE_SOURCES)
-set(HG_WAKE_REQUIRES)
-# The wake word is a build option that promises a detector in the image. Until
-# port_wake.cpp (the AFE + MultiNet engine) and the esp-sr component it needs are in the
-# tree, turning the option on still builds - and ships a firmware whose wake word never
-# fires, with no error anywhere to say why. Fail the build instead, so a promise with no
-# engine behind it cannot reach a device. Clear the guard only by doing all three:
-# port_wake.cpp landed, esp-sr required here, and CONFIG_HG_WAKE_MULTINET=y in the
-# build's sdkconfig.
-if(CONFIG_HG_WAKE_MULTINET)
-    if(NOT EXISTS "${CMAKE_CURRENT_LIST_DIR}/port_wake.cpp")
-        message(FATAL_ERROR
-            "HG_WAKE_MULTINET=y, but main/port_wake.cpp does not exist: nothing would run the "
-            "detector and the device would silently never wake. Either turn the option off or "
-            "add the engine (main/port_wake.cpp plus the espressif/esp-sr dependency in "
-            "idf_component.yml).")
+    list(APPEND HG_P4_REQUIRES esp_lcd_ek79007 esp_lcd_st7123)
+    if(CONFIG_HG_BOARD_WS_P4_TOUCH_LCD_7B)
+        list(APPEND HG_P4_SOURCES "port_camera.cpp")
+        list(APPEND HG_P4_REQUIRES esp_video)
     endif()
-    list(APPEND HG_WAKE_SOURCES "port_wake.cpp")
-    list(APPEND HG_WAKE_REQUIRES esp-sr)
 endif()
-
+# The CoreS3's GC0308 camera rides the S3 DVP backend of esp32-camera; the
+# driver's own Kconfig default enables the GC0308 board support. The action is
+# registered only for this board, so no other S3 image grows.
+set(HG_CORES3_CAMERA_SOURCES)
+set(HG_CORES3_CAMERA_REQUIRES)
+if(IDF_TARGET STREQUAL "esp32s3")
+    if(CONFIG_HG_BOARD_CORES3)
+        list(APPEND HG_CORES3_CAMERA_SOURCES "port_camera_cores3.cpp")
+        list(APPEND HG_CORES3_CAMERA_REQUIRES esp32-camera)
+    endif()
+endif()
+# The RGB panel driver (ST7701 over an I/O expander) only builds for the chips
+# with an LCD_CAM RGB scanout: port_rgb.cpp is compiled out on every other
+# target, and esp_lcd_st7701 does not publish builds for them either.
+if(IDF_TARGET STREQUAL "esp32s3" OR IDF_TARGET STREQUAL "esp32p4")
+    list(APPEND HG_RGB_REQUIRES esp_lcd_st7701 esp_lcd_panel_io_additions)
+endif()
 idf_component_register(
     SRCS
         "main.cpp"
         "board.cpp"
-        ${HG_WAKE_SOURCES}
         "port_amoled.cpp"
         "port_audio.cpp"
         ${HG_P4_SOURCES}
+        ${HG_CORES3_CAMERA_SOURCES}
         "port_ble.cpp"
         "port_buttons.cpp"
+        "port_cardputer.cpp"
         "port_codec.cpp"
         "port_cores3.cpp"
+        "port_sticks3.cpp"
+        "port_stopwatch.cpp"
         "port_tca9554.cpp"
         "port_console.cpp"
+        "port_dac.cpp"
         "port_diag.cpp"
         "port_display.cpp"
         "port_events.cpp"
+        "port_motion.cpp"
         "port_ota.cpp"
         "port_parallel.cpp"
         "port_rgb.cpp"
-        "port_serial.cpp"
+        "port_sdlog.cpp"
         "port_power.cpp"
         "port_latch_power.cpp"
         "port_opus.cpp"
         "../../drivers/axp2101.cpp"
         "../../drivers/cores3.cpp"
+        "../../drivers/sticks3.cpp"
+        "../../drivers/stopwatch.cpp"
+        "../../drivers/bmi270.cpp"
+        "../../drivers/pcf85063.cpp"
+        "../../drivers/rx8130.cpp"
+        "../../drivers/qmi8658.cpp"
         "port_storage.cpp"
+        "port_tailnet.cpp"
         "port_system.cpp"
+        "port_time.cpp"
         "port_touch.cpp"
         "port_wifi.cpp"
         "port_wifi_setup.cpp"
@@ -70,35 +84,40 @@ idf_component_register(
     INCLUDE_DIRS "." "../../drivers" "${CMAKE_CURRENT_BINARY_DIR}"
     REQUIRES core
     # "driver" pulls in GPIO, I2S, LEDC and SPI on every ESP-IDF 5.x release.
-    # ESP-IDF 6.x dropped I2S and LEDC from that catch-all, so name them too;
-    # both components exist in 5.x as well, where this is a no-op.
+    # ESP-IDF 6.x dropped I2S, LEDC and the DAC from that catch-all, so name them
+    # too; all three components exist in 5.x as well, where this is a no-op.
     PRIV_REQUIRES
         app_update
         bt
         driver
         esp_driver_i2s
         esp_driver_ledc
+        esp_driver_dac
         esp_app_format
         esp_adc
         esp_event
+        esp_partition
+        espcoredump
         esp_lcd
-        esp_lcd_st7701
-        esp_lcd_panel_io_additions
+        ${HG_RGB_REQUIRES}
         ${HG_P4_REQUIRES}
-        ${HG_WAKE_REQUIRES}
+        ${HG_CORES3_CAMERA_REQUIRES}
         esp_netif
         esp_http_server
         esp_psram
         esp_timer
         esp_wifi
+        sdmmc
+        fatfs
         console
         nvs_flash
         mbedtls
         esp_websocket_client
+        # Empty unless CONFIG_HG_TAILNET (components/tailtiny).
+        tailtiny
 )
 
-# Bring-up counters for the wake path (Kconfig: Wake word bring-up diagnostics). Off in a
-# release build, so the relay log keeps only `hit:` and the lifecycle lines.
-if(CONFIG_HG_WAKE_DIAG)
-    target_compile_definitions(${COMPONENT_LIB} PRIVATE HG_WAKE_DIAG=1)
-endif()
+# The firmware's own debug lines stay in the build, so the console's `log <tag> debug`
+# can turn them on without a rebuild. A line below its tag's level is skipped at run
+# time. Only this component: ESP-IDF's and the managed components' debug lines stay out.
+target_compile_definitions(${COMPONENT_LIB} PRIVATE LOG_LOCAL_LEVEL=ESP_LOG_DEBUG)

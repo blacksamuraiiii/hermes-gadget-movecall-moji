@@ -39,25 +39,26 @@ class Board:
     scroll_buttons: bool = True
     round: bool = False  # circular panel: pixels outside the circle are not shown
     touch: bool = False  # touchscreen: hold to talk, tap to answer yes, swipe down to cancel
-    # Board-specific layout knobs the firmware reads from its display profile.
-    round_area_permille: int = 0  # 0 keeps the inscribed square (707)
-    no_bottom_bar: bool = False
-    no_top_band: bool = False
-    body_rows_cap: int = 0
-    robot_face: bool = False
-    emoji_face: bool = False
-    greeting: str | None = None
+    motion: bool = False  # accelerometer: face-down sleep
 
 
 BOARDS = {
     "sim-320x240": Board("sim-320x240", 320, 240),
     "sim-240x135": Board("sim-240x135", 240, 135),
+    # Geometry/audio only; physical keyboard/editor have separate host C++ tests.
+    "cardputer-adv": Board("cardputer-adv", 240, 135),
     "sim-480x320": Board("sim-480x320", 480, 320),
     "sim-240x240-nospeaker": Board("sim-240x240-nospeaker", 240, 240, speaker=False),
     # A 1.54" 240x240 SPI LCD with codecs (e.g. Waveshare ESP32-S3-LCD-1.54): no scroll buttons.
     "sim-240x240": Board("sim-240x240", 240, 240, scroll_buttons=False),
+    # A 1.83" 240x284 SPI LCD with touch (e.g. Waveshare ESP32-S3-Touch-LCD-1.83).
+    "sim-240x284": Board("sim-240x284", 240, 284, scroll_buttons=False, touch=True),
+    # A 2.8" 240x320 SPI LCD in portrait with touch (e.g. LCDWIKI ES3C28P).
+    "sim-240x320": Board("sim-240x320", 240, 320, scroll_buttons=False, touch=True),
     # A 1.28" round 240x240 LCD with touch (e.g. Spotpear ESP32-S3-1.28-BOX): no scroll buttons.
     "sim-240x240-round": Board("sim-240x240-round", 240, 240, scroll_buttons=False, round=True, touch=True),
+    # Round 412x412 touch boards (SenseCAP Watcher W1-A, Waveshare 1.46): no scroll buttons.
+    "sim-412x412-round": Board("sim-412x412-round", 412, 412, scroll_buttons=False, round=True, touch=True),
     # Waveshare 1.85C V2: round LCD and touch, no scroll buttons.
     "sim-360x360-round": Board("sim-360x360-round", 360, 360, scroll_buttons=False, round=True, touch=True),
     # Waveshare ESP32-S3-Knob-Touch-LCD-1.8: same round 360x360 screen as the 1.85C V2,
@@ -65,14 +66,8 @@ BOARDS = {
     "sim-360x360-knob": Board("sim-360x360-knob", 360, 360, speaker=False, scroll_buttons=False,
                               round=True, touch=True),
     # A 1.75" round 466x466 AMOLED touch board (e.g. ESP32-S3-Touch-AMOLED-1.75): no scroll buttons.
-    "sim-466x466-round": Board("sim-466x466-round", 466, 466, scroll_buttons=False, round=True, touch=True),
-    # The moji board: 1.28" round GC9A01, one BOOT key, its own robot face, a 16 px
-    # Noto/Montserrat font and a thin bezel (86% of the panel). Screenshots from this
-    # board match the glass, so layout questions are answered here, not on the desk.
-    "sim-moji": Board("sim-moji", 240, 240, scroll_buttons=False, round=True, touch=False,
-                       round_area_permille=1000, no_bottom_bar=True, body_rows_cap=4,
-                       no_top_band=True,
-                       emoji_face=True, greeting="Hi, I'm Moji"),
+    "sim-466x466-round": Board("sim-466x466-round", 466, 466, scroll_buttons=False, round=True, touch=True,
+                               motion=True),
     # A 1.8" rectangular 368x448 AMOLED touch board (e.g. ESP32-S3-Touch-AMOLED-1.8): no scroll buttons.
     "sim-368x448": Board("sim-368x448", 368, 448, scroll_buttons=False, touch=True),
     # The 2.06" 410x502 AMOLED watch (ESP32-S3-Touch-AMOLED-2.06), as the firmware draws it:
@@ -80,9 +75,15 @@ BOARDS = {
     "sim-410x486": Board("sim-410x486", 410, 486, scroll_buttons=False, touch=True),
     # A 2.16" square 480x480 AMOLED touch board (e.g. ESP32-S3-Touch-AMOLED-2.16).
     "sim-480x480": Board("sim-480x480", 480, 480, scroll_buttons=False, touch=True),
+    # A round 480x480 touch board with no microphone or speaker (the CrowPanel 2.1): timers show, silently.
+    "sim-480x480-round-nospeaker": Board("sim-480x480-round-nospeaker", 480, 480, mic=False, speaker=False,
+                                         scroll_buttons=False, round=True, touch=True),
     # A 1.9" 320x170 board with no audio hardware (e.g. LilyGO T-Display-S3).
     "sim-320x170-nospeaker": Board("sim-320x170-nospeaker", 320, 170, mic=False, speaker=False,
                                    scroll_buttons=False),
+    # A 1.47" 320x172 landscape touch board with no audio hardware (e.g. Waveshare ESP32-S3-Touch-LCD-1.47).
+    "sim-320x172-nospeaker": Board("sim-320x172-nospeaker", 320, 172, mic=False, speaker=False,
+                                   scroll_buttons=False, touch=True),
     # A 5.0" 800x480 RGB touch board with no audio hardware (e.g. Elecrow CrowPanel 5.0).
     "sim-800x480-nospeaker": Board("sim-800x480-nospeaker", 800, 480, mic=False, speaker=False,
                                    scroll_buttons=False, touch=True),
@@ -189,6 +190,9 @@ class Simulator:
         self.restarts = 0
         self._update_buf: bytearray | None = None
         self._restart_requested = False
+        self._fixed_time: time.struct_time | None = None
+        self.face_down = False
+        self._motion_at = 0
 
         b = self.board
         self.device = NativeDevice(
@@ -196,11 +200,7 @@ class Simulator:
             server_url=url, access_token=token, mic=b.mic, speaker=b.speaker, backlight=b.backlight,
             scroll_buttons=b.scroll_buttons, library=library, button_labels=button_labels,
             round_panel=b.round, touch_screen=b.touch, update_capacity=UPDATE_SLOT_BYTES,
-            update_pending=update_pending, power=True,
-            round_area_permille=b.round_area_permille, no_bottom_bar=b.no_bottom_bar,
-            no_top_band=b.no_top_band,
-            body_rows_cap=b.body_rows_cap, robot_face=b.robot_face, emoji_face=b.emoji_face,
-            greeting=b.greeting)
+            update_pending=update_pending, power=True, motion=b.motion)
         self._round_spans = _circle_spans(b.width, b.height) if b.round else None
         self._register_actions()
 
@@ -316,6 +316,10 @@ class Simulator:
     def update_confirm(self) -> None:
         self.update_confirmed = True
 
+    def wall_time(self) -> time.struct_time | None:
+        """Local time for the clock face; set_wall_time() pins it for tests and screenshots."""
+        return self._fixed_time or time.localtime()
+
     # -- virtual peripherals -------------------------------------------------------------
 
     def _register_actions(self) -> None:
@@ -388,6 +392,10 @@ class Simulator:
         if self._wav_release_at is not None and time.monotonic() >= self._wav_release_at:
             self._wav_release_at = None
             self.release("talk")
+        if self.board.motion and self.now_ms() - self._motion_at >= 100:
+            # A steady 10 Hz accelerometer, like the board's: lying face up or face down.
+            self._motion_at = self.now_ms()
+            self.device.motion(0, 0, -1000 if self.face_down else 1000)
         self.device.tick()
         if self._restart_requested:
             self._restart_requested = False
@@ -428,6 +436,15 @@ class Simulator:
     def touch(self, touching: bool, x: int = 0, y: int = 0) -> None:
         """A touchscreen sample in screen pixels (touch boards only)."""
         self.device.touch(touching, x, y)
+
+    def set_face_down(self, down: bool) -> None:
+        """Lay the simulated board face down (or turn it back over); boards with motion only."""
+        self.face_down = down
+        self._motion_at = 0  # send the new orientation on the next step
+
+    def set_wall_time(self, when: time.struct_time | None) -> None:
+        """Pin the clock face's time (screenshots, tests); None follows the computer's clock."""
+        self._fixed_time = when
 
     def tap(self, button: str) -> None:
         self.press(button)

@@ -1,12 +1,18 @@
 """The production device core (in the simulator) against the production hub."""
 
+import io
 import json
 import math
 import struct
+import threading
+import weakref
+from array import array
 
 import pytest
 
 from conftest import requires_sim
+from hermes_gadget_plugin.face import ProfileFace
+from hermes_gadget_plugin.hub import HubDelegate
 
 pytestmark = requires_sim
 
@@ -24,6 +30,27 @@ def test_open_device_reaches_ready_and_text_round_trips(devserver, make_sim):
     assert sim.wait_for(lambda: (sim.last_received("turn.end") or {}).get("outcome") == "success", timeout=10)
     assert sim.last_received("reply")["text"] == "You said: ping"
     assert sim.wait_screen("ready", timeout=5)
+
+
+def test_welcome_names_the_language_and_an_auto_device_follows_it(devserver, make_sim):
+    _hub, _brain, url = devserver(language="es")
+    sim = make_sim(url)
+    assert sim.wait_screen("ready", timeout=10)
+    welcome = [m for m in sim.received if m.get("type") == "welcome"][-1]
+    assert welcome["language"] == "es"
+    assert sim.status()["language"] == "en"  # English by default: welcome doesn't change it
+    assert sim.console("set language auto") == "@ok language"
+    assert sim.status()["language"] == "es" and sim.status()["language_auto"] is True
+
+
+def test_welcome_names_no_language_when_the_server_has_none(devserver, make_sim):
+    _hub, _brain, url = devserver()
+    sim = make_sim(url)
+    assert sim.wait_screen("ready", timeout=10)
+    welcome = [m for m in sim.received if m.get("type") == "welcome"][-1]
+    assert "language" not in welcome
+    assert sim.console("set language auto") == "@ok language"
+    assert sim.status()["language"] == "en"
 
 
 def test_pairing_code_flow(loop_thread, devserver, make_sim):
@@ -111,6 +138,26 @@ def test_voice_is_uploaded_as_wav_and_played_back(devserver, make_sim):
     assert sim.speaker.last_file is not None and sim.speaker.last_file.stat().st_size > 20000
 
 
+def test_a_recording_survives_a_lost_connection_and_is_sent_after_reconnecting(loop_thread, devserver, make_sim):
+    hub, _brain, url = devserver()
+    sim = make_sim(url)
+    assert sim.wait_screen("ready", timeout=10)
+    hub.port = hub.bound_port  # come back on the same port
+    seconds = sim.speak_pcm(_tone(3.0))
+    assert sim.wait_screen("listening", timeout=2)
+    sim.run_for(0.8)
+    loop_thread.run(hub.stop())  # the connection drops mid-recording
+    sim.run_for(0.5)
+    assert sim.device.screen() == "listening"  # still recording, not the connecting screen
+    assert sim.wait_screen("thinking", timeout=5)  # the recording ended while offline
+    loop_thread.run(hub.start())
+    assert sim.wait_for(lambda: sim.last_received("turn.end") is not None, timeout=20)
+    reply = sim.last_received("reply")["text"]
+    heard = float(reply.split("I heard ")[1].split(" seconds")[0])
+    assert abs(heard - seconds - 0.3) < 0.25  # all of it, from before and after the drop
+    assert sim.wait_screen("ready", timeout=10)
+
+
 def test_cancel_interrupts_the_turn(devserver, make_sim):
     hub, brain, url = devserver()
     brain.word_delay = 0.3
@@ -156,6 +203,24 @@ def test_agent_invokes_device_actions(loop_thread, devserver, make_sim):
     bad = asyncio.run_coroutine_threadsafe(session.invoke_action("led.set", {}), loop_thread.loop)
     assert sim.wait_for(bad.done, timeout=5)
     assert "color is required" in str(bad.exception())
+
+
+def test_the_hub_takes_a_diagnostics_report_without_a_cable(loop_thread, devserver, make_sim):
+    hub, _brain, url = devserver()
+    sim = make_sim(url)
+    assert sim.wait_screen("ready", timeout=10)
+    session = next(iter(hub.sessions.values()))
+
+    import asyncio
+
+    got = asyncio.run_coroutine_threadsafe(session.request_diag(), loop_thread.loop)
+    assert sim.wait_for(got.done, timeout=5)
+    report = got.result()["report"]
+    # The same report the console's `diag` prints.
+    assert report["device_id"] == session.device_id
+    assert report["app"]["phase"] == "online"
+    assert isinstance(report["connection"]["closes_total"], int)
+    assert isinstance(got.result()["log"], str)
 
 
 def test_cards_and_images_take_over_the_screen(loop_thread, devserver, make_sim):
@@ -534,7 +599,7 @@ def test_the_dashboard_opens_from_the_idle_screen(loop_thread, devserver, make_s
     sim = make_sim(url, board=board)
     assert sim.wait_screen("ready", timeout=10)
     session = next(iter(hub.sessions.values()))
-    assert session.dashboard_version == 1
+    assert session.dashboard_version == 2  # each of these boards can page widgets
     msg = dashboard.message(SAMPLE_DASHBOARD["sessions"], SAMPLE_DASHBOARD["tiles"],
                             cols=session.display.get("text_cols"))
     assert loop_thread.run(session.send_dashboard(msg))
@@ -555,3 +620,1072 @@ def test_the_dashboard_opens_from_the_idle_screen(loop_thread, devserver, make_s
     assert any(p[0] < 120 and 140 < p[1] < 200 and p[2] > 200 for p in pixels)  # the busy session's blue
     assert any(p[0] > 200 and 150 < p[1] < 200 and p[2] < 90 for p in pixels)  # the waiting one's amber
     sim.screenshot(tmp_path / f"dashboard-{board}.png")
+
+
+def _swipe(sim, dx: int, dy: int) -> None:
+    """A straight swipe across the middle of the screen."""
+    x, y = sim.board.width // 2 - dx // 2, sim.board.height // 2 - dy // 2
+    sim.touch(True, x, y)
+    for i in range(1, 7):
+        sim.touch(True, x + dx * i // 6, y + dy * i // 6)
+        sim.run_for(0.02)
+    sim.touch(False)
+    sim.run_for(0.05)
+
+
+@pytest.mark.parametrize("board", ["sim-320x240", "sim-240x135", "sim-466x466-round", "sim-800x480-nospeaker"])
+def test_widgets_page_from_the_idle_screen(loop_thread, devserver, make_sim, board, tmp_path):
+    from hermes_gadget.devserver import SAMPLE_DASHBOARD
+    from hermes_gadget_plugin import dashboard
+
+    hub, _brain, url = devserver()
+    sim = make_sim(url, board=board)
+    assert sim.wait_screen("ready", timeout=10)
+    session = next(iter(hub.sessions.values()))
+    assert session.dashboard_version == 2
+    msg = dashboard.message(SAMPLE_DASHBOARD["sessions"], SAMPLE_DASHBOARD["tiles"], SAMPLE_DASHBOARD["widgets"],
+                            charset=session.charset, cols=session.display.get("text_cols"),
+                            version=session.dashboard_version)
+    assert loop_thread.run(session.send_dashboard(msg))
+    assert sim.wait_for(lambda: sim.last_received("dashboard") is not None, timeout=5)
+    assert sim.status()["screen"] == "ready"  # data, not a screen takeover
+    step = sim.board.width // 2
+
+    def forward():
+        _swipe(sim, step, 0) if sim.board.touch else sim.tap("down")
+
+    def back():
+        _swipe(sim, -step, 0) if sim.board.touch else sim.tap("up")
+
+    seen = []
+    for kind in ("value", "progress", "list", "headline"):
+        forward()
+        assert sim.wait_screen("widget", timeout=5), kind
+        sim.run_for(0.2)
+        seen.append(sim.rgb888())
+        sim.screenshot(tmp_path / f"widget-{board}-{kind}.png")
+    assert len(set(seen)) == 4  # four different pages
+    pixels = {seen[0][i:i + 3] for i in range(0, len(seen[0]), 3)}
+    assert any(p[0] < 100 and p[1] > 190 and 110 < p[2] < 170 for p in pixels)  # the value, green for "ok"
+    back()
+    sim.run_for(0.2)
+    assert sim.rgb888() == seen[2]  # the list again
+    forward()
+    forward()  # past the last one
+    assert sim.wait_screen("ready", timeout=5)
+    forward()
+    assert sim.wait_screen("widget", timeout=5)
+    sim.run_for(0.2)
+    assert sim.rgb888() == seen[0]  # they open at the first
+    back()
+    assert sim.wait_screen("ready", timeout=5)
+    forward()
+    assert sim.wait_screen("widget", timeout=5)
+    _swipe(sim, 0, sim.board.height // 2) if sim.board.touch else sim.tap("cancel")
+    assert sim.wait_screen("ready", timeout=5)
+    # A snapshot without widgets takes them away.
+    assert loop_thread.run(session.send_dashboard(dashboard.message(
+        SAMPLE_DASHBOARD["sessions"], [], [], version=session.dashboard_version)))
+    assert sim.wait_for(lambda: sim.last_received("dashboard").get("widgets") == [], timeout=5)
+    forward()
+    sim.run_for(0.3)
+    assert sim.status()["screen"] == "ready"
+
+
+def test_a_board_that_cannot_page_widgets_lists_them_as_tiles(loop_thread, devserver, make_sim):
+    from hermes_gadget.devserver import SAMPLE_DASHBOARD
+    from hermes_gadget_plugin import dashboard
+
+    hub, _brain, url = devserver()
+    sim = make_sim(url, board="sim-240x240")  # TALK and CANCEL: no scroll buttons, no touch
+    assert sim.wait_screen("ready", timeout=10)
+    session = next(iter(hub.sessions.values()))
+    assert session.dashboard_version == 1
+    msg = dashboard.message([], SAMPLE_DASHBOARD["tiles"], SAMPLE_DASHBOARD["widgets"],
+                            cols=session.display.get("text_cols"), version=session.dashboard_version)
+    assert msg["v"] == 1 and len(msg["tiles"]) == 6
+    assert loop_thread.run(session.send_dashboard(msg))
+    assert sim.wait_for(lambda: sim.last_received("dashboard") is not None, timeout=5)
+    sim.tap("cancel")
+    assert sim.wait_screen("dashboard", timeout=5)
+    # The layout it asked for is the only one it takes: a layout 2 message changes nothing.
+    newer = dashboard.message([], [], SAMPLE_DASHBOARD["widgets"])
+    before = sim.rgb888()
+    assert loop_thread.run(session.send_dashboard(newer))
+    assert sim.wait_for(lambda: sim.last_received("dashboard").get("v") == 2, timeout=5)
+    sim.run_for(0.3)
+    assert sim.status()["screen"] == "dashboard" and sim.rgb888() == before
+
+
+class _TwoProfiles(HubDelegate):
+    """Offers two profiles; switching always succeeds for known ones."""
+
+    def profiles(self, session=None):
+        return [{"id": "default", "name": "Hermes"}, {"id": "ops", "name": "Ops"}]
+
+    async def select_profile(self, session, profile):
+        if profile not in ("default", "ops"):
+            return "unknown"
+        session.profile = profile
+        return None
+
+
+def test_devices_switch_hermes_profile_and_keep_it(loop_thread, tmp_path, make_sim):
+    from hermes_gadget_plugin.hub import DeviceHub
+    from hermes_gadget_plugin.store import DeviceStore
+
+    hub = DeviceHub(DeviceStore(tmp_path / "server"), _TwoProfiles(), host="127.0.0.1", port=0, heartbeat_s=5)
+    loop_thread.run(hub.start())
+    try:
+        url = f"ws://127.0.0.1:{hub.bound_port}/gadget"
+        sim = make_sim(url)
+        assert sim.wait_screen("ready", timeout=10)
+        welcome = sim.last_received("welcome")
+        assert welcome["profile"] == "default"
+        assert [p["id"] for p in welcome["profiles"]] == ["default", "ops"]
+        sim.console("settings")
+        for _ in range(3):
+            sim.console("cancel")
+        sim.console("talk")
+        sim.console("release")
+        assert sim.wait_for(lambda: sim.status().get("profile") == "ops", timeout=5)
+        assert hub.get(sim.status()["device_id"]).profile == "ops"
+        assert sim.last_received("profile") == {"type": "profile", "profile": "ops"}  # the wire, not only state
+        first_session = welcome["session"]
+        sim.close()
+        again = make_sim(url)  # same state dir: the device remembers its profile
+        assert again.wait_screen("ready", timeout=10)
+        assert again.last_received("welcome")["session"] != first_session
+        assert again.last_received("welcome")["profile"] == "ops"
+    finally:
+        loop_thread.run(hub.stop())
+
+
+
+def test_a_double_press_of_talk_goes_back_to_the_default_profile(loop_thread, tmp_path, make_sim):
+    from hermes_gadget_plugin.hub import DeviceHub
+    from hermes_gadget_plugin.store import DeviceStore
+
+    hub = DeviceHub(DeviceStore(tmp_path / "server"), _TwoProfiles(), host="127.0.0.1", port=0, heartbeat_s=5)
+    loop_thread.run(hub.start())
+    try:
+        url = f"ws://127.0.0.1:{hub.bound_port}/gadget"
+        sim = make_sim(url)
+        assert sim.wait_screen("ready", timeout=10)
+        sim.console("settings")
+        for _ in range(3):
+            sim.console("cancel")
+        sim.console("talk")
+        sim.console("release")
+        assert sim.wait_for(lambda: sim.status().get("profile") == "ops", timeout=5)
+        sim.console("settings close")
+        assert sim.wait_screen("ready", timeout=5)
+        # Two quick presses of the TALK key: the first starts a recording, the second throws it away.
+        sim.press("talk")
+        sim.release("talk")
+        sim.press("talk")
+        sim.release("talk")
+        assert sim.wait_for(lambda: sim.status().get("profile") == "default", timeout=5)
+        assert hub.get(sim.status()["device_id"]).profile == "default"
+        assert sim.device.screen() == "ready"
+    finally:
+        loop_thread.run(hub.stop())
+
+def _face(ink: int) -> bytes:
+    """A face the device takes (docs/protocol.md#faces): every bitmap byte ``ink``, the mascot's anchors."""
+    from hermes_gadget_plugin.face import FACE_BYTES
+
+    anchors = struct.pack("<10h", 607, 293, 262, 620, 801, 107, 396, 508, 586, 649)
+    return bytes([ink]) * (FACE_BYTES - len(anchors)) + anchors
+
+
+def _digest(face: bytes) -> str:
+    return ProfileFace.of(face).hash
+
+
+def _held_face(sim):
+    """The hash of the face the device holds, as the hello of a reconnect names it."""
+    sim.console("reconnect")
+    assert sim.wait_screen("connecting", timeout=5)
+    assert sim.wait_screen("ready", timeout=10)
+    return [m for m in sim.sent if m.get("type") == "hello"][-1].get("face")
+
+
+def _shows_mascot(sim, session, loop_thread) -> bool:
+    """Whether the screen shows the mascot: clearing the face then changes nothing but a blink."""
+    sim.run_for(0.2)
+    before = sim.rgb888()
+    loop_thread.run(session.send_json({"type": "face", "profile": session.device_profile}))
+    sim.run_for(0.2)
+    after = sim.rgb888()
+    return sum(before[i:i + 3] != after[i:i + 3] for i in range(0, len(before), 3)) < 300
+
+
+class _ProfileFaces(_TwoProfiles):
+    """The default profile has a face; ops has none."""
+
+    async def face(self, session):
+        return ProfileFace.of(_face(0xF0)) if session.profile == "default" else None
+
+
+def test_a_profile_face_is_sent_once_and_the_mascot_comes_back_on_a_switch(loop_thread, tmp_path, make_sim):
+    from hermes_gadget_plugin.hub import DeviceHub
+    from hermes_gadget_plugin.store import DeviceStore
+
+    hub = DeviceHub(DeviceStore(tmp_path / "server"), _ProfileFaces(), host="127.0.0.1", port=0, heartbeat_s=5)
+    loop_thread.run(hub.start())
+    faces = lambda: [m for m in sim.received if m.get("type") == "face"]  # noqa: E731
+    try:
+        sim = make_sim(f"ws://127.0.0.1:{hub.bound_port}/gadget")
+        assert sim.wait_screen("ready", timeout=10)
+        assert sim.wait_for(lambda: faces(), timeout=5)
+        sent = faces()[0]
+        assert sent["profile"] == "default" and len(sent["hash"]) == 16 and sent["bits"]
+
+        sim.console("reconnect")  # the device names the face it holds, so it is not sent again
+        assert sim.wait_screen("connecting", timeout=5)
+        assert sim.wait_screen("ready", timeout=10)
+        sim.run_for(0.3)
+        assert len(faces()) == 1
+
+        device = hub.get(sim.status()["device_id"])
+        loop_thread.run(hub.delegate.select_profile(device, "ops"))
+        loop_thread.run(device.send_profile())  # ops has no face: the device drops it by itself
+        assert sim.wait_for(lambda: sim.status().get("profile") == "ops", timeout=5)
+        sim.run_for(0.3)
+        assert len(faces()) == 1 and device.face_hash is None
+
+        loop_thread.run(hub.delegate.select_profile(device, "default"))
+        loop_thread.run(device.send_profile())
+        assert sim.wait_for(lambda: len(faces()) == 2, timeout=5)
+        assert faces()[1]["hash"] == sent["hash"]
+    finally:
+        loop_thread.run(hub.stop())
+
+
+class _ColourFaces(_TwoProfiles):
+    """The default profile's avatar, made at the size the device asks for: a rose disc on transparency."""
+
+    def __init__(self, picture: bytes):
+        self.picture, self.made = picture, []
+
+    async def face(self, session):
+        from hermes_gadget_plugin.face import ProfileFace, colour_from_picture
+
+        if session.profile != "default" or not session.face_px:
+            return None
+        px = session.face_px
+
+        def load():
+            self.made.append(px)
+            return colour_from_picture(io.BytesIO(self.picture), px)
+
+        return ProfileFace(f"rose-{px}", load)
+
+
+def test_a_colour_board_shows_the_avatar_in_colour_and_keeps_it_through_a_reconnect(loop_thread, tmp_path, make_sim):
+    pytest.importorskip("PIL")
+    from PIL import Image, ImageDraw
+
+    from hermes_gadget_plugin.hub import DeviceHub
+    from hermes_gadget_plugin.store import DeviceStore
+
+    art = Image.new("RGBA", (300, 300), (0, 0, 0, 0))
+    ImageDraw.Draw(art).ellipse((30, 30, 270, 270), fill=(220, 60, 120, 255))
+    picture = io.BytesIO()
+    art.save(picture, "PNG")
+    delegate = _ColourFaces(picture.getvalue())
+    hub = DeviceHub(DeviceStore(tmp_path / "server"), delegate, host="127.0.0.1", port=0, heartbeat_s=5)
+    loop_thread.run(hub.start())
+    starts = lambda: [m for m in sim.received if m.get("type") == "face.start"]  # noqa: E731
+    try:
+        sim = make_sim(f"ws://127.0.0.1:{hub.bound_port}/gadget")
+        assert sim.wait_screen("ready", timeout=10)
+        hello = [m for m in sim.sent if m.get("type") == "hello"][-1]
+        assert hello["caps"]["faces"]["v"] == 2 and 64 <= hello["caps"]["faces"]["px"] <= 256
+        assert sim.wait_for(lambda: starts(), timeout=5)
+        assert starts()[0]["width"] == hello["caps"]["faces"]["px"]
+        sim.run_for(0.3)
+        pixels = array("H", sim.device.framebuffer_rows())
+        assert pixels.count((220 & 0xF8) << 8 | (60 & 0xFC) << 3 | 120 >> 3) > 1000  # the disc, in its own colour
+        assert not [m for m in sim.received if m.get("type") == "face"]
+
+        assert _held_face(sim) == f"rose-{hello['caps']['faces']['px']}"  # kept, and not sent again
+        sim.run_for(0.3)
+        assert len(starts()) == 1 and len(delegate.made) == 1
+    finally:
+        loop_thread.run(hub.stop())
+
+
+class _RoutedLater(_TwoProfiles):
+    """Two profiles a device picks from, until a gadget route sends it to ``route``: no roster then."""
+
+    def __init__(self):
+        self.route = None
+        self.faces = {"ops": _face(0x0F), "work": _face(0x3C)}
+        self.converting = None  # a threading.Event the route's face waits for, as converting an avatar would
+        self.started = threading.Event()  # set once that wait begins
+
+    def profiles(self, session=None):
+        return [] if self.route else super().profiles(session)
+
+    async def face(self, session):
+        data = self.faces.get(self.route or session.profile)
+        if data is None:
+            return None
+        if not (self.route and self.converting):
+            return ProfileFace.of(data)
+
+        def load():
+            self.started.set()
+            self.converting.wait(10)
+            return data
+        return ProfileFace(_digest(data), load)
+
+
+def test_a_device_on_a_route_added_while_it_was_away_takes_the_routes_face(loop_thread, tmp_path, make_sim):
+    """The welcome then names no profile, so a face names the one the device kept, and the device takes it."""
+    from hermes_gadget_plugin.hub import DeviceHub
+    from hermes_gadget_plugin.store import DeviceStore
+
+    delegate = _RoutedLater()
+    hub = DeviceHub(DeviceStore(tmp_path / "server"), delegate, host="127.0.0.1", port=0, heartbeat_s=5)
+    loop_thread.run(hub.start())
+    url = f"ws://127.0.0.1:{hub.bound_port}/gadget"
+    last_face = lambda sim: ([m for m in sim.received if m.get("type") == "face"] or [{}])[-1]  # noqa: E731
+    try:
+        sim = make_sim(url)
+        assert sim.wait_screen("ready", timeout=10)
+        device = hub.get(sim.status()["device_id"])
+        loop_thread.run(delegate.select_profile(device, "ops"))
+        loop_thread.run(device.send_profile())
+        assert sim.wait_for(lambda: last_face(sim).get("hash") == _digest(delegate.faces["ops"]), timeout=5)
+        assert _held_face(sim) == _digest(delegate.faces["ops"])
+
+        delegate.route = "work"  # a reconnect with ops's face held
+        assert _held_face(sim) == _digest(delegate.faces["ops"])
+        assert sim.wait_for(lambda: last_face(sim).get("hash") == _digest(delegate.faces["work"]), timeout=5)
+        assert last_face(sim)["profile"] == "ops"  # the profile the device keeps, not the route's
+        assert _held_face(sim) == _digest(delegate.faces["work"])
+
+        work = _digest(delegate.faces.pop("work"))  # no face, or profile_faces off
+        assert _held_face(sim) == work
+        assert "face" not in sim.last_received("welcome")  # so the device drops it
+        assert _held_face(sim) is None
+
+        delegate.faces["work"] = _face(0x3C)
+        sim.close()
+        again = make_sim(url)  # a restart: the stored choice of ops, no face in memory
+        assert again.wait_screen("ready", timeout=10)
+        assert again.wait_for(lambda: last_face(again).get("hash") == work, timeout=5)
+        assert _held_face(again) == work
+    finally:
+        loop_thread.run(hub.stop())
+
+
+def test_a_new_route_shows_the_mascot_while_its_face_is_made(loop_thread, tmp_path, make_sim):
+    """Never the previous profile's face: the welcome drops it at once, and the route's face follows."""
+    from hermes_gadget_plugin.hub import DeviceHub
+    from hermes_gadget_plugin.store import DeviceStore
+
+    delegate = _RoutedLater()
+    hub = DeviceHub(DeviceStore(tmp_path / "server"), delegate, host="127.0.0.1", port=0, heartbeat_s=5)
+    loop_thread.run(hub.start())
+    last_face = lambda: ([m for m in sim.received if m.get("type") == "face"] or [{}])[-1]  # noqa: E731
+    ops, work = _digest(delegate.faces["ops"]), _digest(delegate.faces["work"])
+    try:
+        sim = make_sim(f"ws://127.0.0.1:{hub.bound_port}/gadget")
+        assert sim.wait_screen("ready", timeout=10)
+        device_id = sim.status()["device_id"]
+        device = hub.get(device_id)
+        loop_thread.run(delegate.select_profile(device, "ops"))
+        loop_thread.run(device.send_profile())
+        assert sim.wait_for(lambda: last_face().get("hash") == ops, timeout=5)
+        assert _held_face(sim) == ops  # an unchanged face stays through a reconnect, unsent
+        assert sim.last_received("welcome")["face"] == ops
+
+        delegate.converting = threading.Event()
+        delegate.route = "work"
+        welcomes = len([m for m in sim.received if m.get("type") == "welcome"])
+        sim.console("reconnect")
+        assert sim.wait_for(delegate.started.is_set, timeout=10)  # work's face is being made
+        assert _shows_mascot(sim, hub.get(device_id), loop_thread)  # not ops's face meanwhile
+        delegate.converting.set()
+        assert sim.wait_for(lambda: len([m for m in sim.received if m.get("type") == "welcome"]) > welcomes, timeout=10)
+        assert "face" not in sim.last_received("welcome")  # ops's face is not kept
+        assert sim.wait_for(lambda: last_face().get("hash") == work, timeout=5)
+        assert _held_face(sim) == work
+    finally:
+        if delegate.converting:
+            delegate.converting.set()  # no face left waiting on a failure
+        loop_thread.run(hub.stop())
+
+
+class _SlowLookup(_ProfileFaces):
+    """Finding the face waits for ``found``, as a stalled file read would."""
+
+    def __init__(self):
+        self.found = None  # an asyncio.Event
+        self.texts = []
+
+    async def face(self, session):
+        if self.found:
+            await self.found.wait()
+        return await super().face(session)
+
+    async def on_text(self, session, msg_id, text):
+        self.texts.append(text)
+
+
+def test_a_stalled_face_lookup_does_not_hold_up_the_connection(loop_thread, tmp_path, make_sim):
+    import asyncio
+
+    from hermes_gadget_plugin.hub import DeviceHub
+    from hermes_gadget_plugin.store import DeviceStore
+
+    delegate = _SlowLookup()
+    hub = DeviceHub(DeviceStore(tmp_path / "server"), delegate, host="127.0.0.1", port=0, heartbeat_s=5)
+    loop_thread.run(hub.start())
+    try:
+        delegate.found = asyncio.Event()  # never set: the lookup never finishes
+        sim = make_sim(f"ws://127.0.0.1:{hub.bound_port}/gadget")
+        assert sim.wait_screen("ready", timeout=8)  # well inside the device's 10 s handshake limit
+        assert "face" not in sim.last_received("welcome")
+        sim.type_text("still here?")  # messages are read while the face is still being looked up
+        assert sim.wait_for(lambda: delegate.texts == ["still here?"], timeout=5)
+        welcomes = len([m for m in sim.received if m.get("type") == "welcome"])
+        sim.run_for(16)  # past the device's limit for a silent server: 3 heartbeats of 5 s
+        assert sim.status()["phase"] == "online"
+        assert len([m for m in sim.received if m.get("type") == "welcome"]) == welcomes  # no reconnect
+    finally:
+        loop_thread.loop.call_soon_threadsafe(delegate.found.set)
+        loop_thread.run(hub.stop())
+
+
+class _Picture:
+    """Stands for the source picture a face's load() keeps."""
+
+
+class _PictureFaces(_ProfileFaces):
+    """Each face's load() keeps a picture, as a converted avatar's does; ``pictures`` tracks them."""
+
+    def __init__(self):
+        self.pictures = []
+
+    async def face(self, session):
+        picture, data = _Picture(), _face(0xF0)
+        self.pictures.append(weakref.ref(picture))
+        return ProfileFace(_digest(data), lambda: picture and data)
+
+
+def test_a_connection_keeps_no_source_picture_once_its_face_is_settled(loop_thread, tmp_path, make_sim):
+    import gc
+
+    from hermes_gadget_plugin.hub import DeviceHub
+    from hermes_gadget_plugin.store import DeviceStore
+
+    delegate = _PictureFaces()
+    hub = DeviceHub(DeviceStore(tmp_path / "server"), delegate, host="127.0.0.1", port=0, heartbeat_s=5)
+    loop_thread.run(hub.start())
+    try:
+        sim = make_sim(f"ws://127.0.0.1:{hub.bound_port}/gadget")
+        assert sim.wait_screen("ready", timeout=10)
+        assert sim.wait_for(lambda: sim.last_received("face"), timeout=5)  # sent: the picture was used
+        assert _held_face(sim) == _digest(_face(0xF0))  # kept: the picture was not needed
+        sim.run_for(0.3)
+        gc.collect()
+        assert len(delegate.pictures) == 2 and all(ref() is None for ref in delegate.pictures)
+    finally:
+        loop_thread.run(hub.stop())
+
+
+def test_a_device_unpaired_while_its_face_is_looked_up_gets_an_unpaired_welcome(loop_thread, tmp_path, make_sim):
+    import asyncio
+
+    from hermes_gadget_plugin.hub import DeviceHub
+    from hermes_gadget_plugin.store import DeviceStore
+
+    delegate = _SlowLookup()
+    hub = DeviceHub(DeviceStore(tmp_path / "server"), delegate, host="127.0.0.1", port=0, heartbeat_s=5)
+    loop_thread.run(hub.start())
+    try:
+        sim = make_sim(f"ws://127.0.0.1:{hub.bound_port}/gadget")
+        assert sim.wait_screen("ready", timeout=10)
+        assert sim.wait_for(lambda: sim.last_received("face"), timeout=5)
+        device_id, first = sim.status()["device_id"], hub.get(sim.status()["device_id"])
+        sent = len([m for m in sim.received if m.get("type") == "face"])
+        delegate.found = asyncio.Event()
+        sim.console("reconnect")
+        assert sim.wait_for(lambda: hub.get(device_id) not in (None, first), timeout=10)
+        loop_thread.run(hub.get(device_id).set_paired(False))  # revoked while the face is looked up
+        loop_thread.loop.call_soon_threadsafe(delegate.found.set)
+        assert sim.wait_for(lambda: sim.last_received("welcome")["session"] != first.session_id, timeout=10)
+        assert sim.last_received("welcome")["paired"] is False
+        sim.run_for(0.3)
+        assert sim.status()["paired"] is False
+        assert not any("bits" in m for m in [m for m in sim.received if m.get("type") == "face"][sent:])  # no face sent
+    finally:
+        if delegate.found:
+            loop_thread.loop.call_soon_threadsafe(delegate.found.set)
+        loop_thread.run(hub.stop())
+
+
+def test_a_restarted_gateway_keeps_an_unchanged_face_without_sending_it(loop_thread, tmp_path, make_sim):
+    from hermes_gadget_plugin.hub import DeviceHub
+    from hermes_gadget_plugin.store import DeviceStore
+
+    def start_hub(port=0):
+        hub = DeviceHub(DeviceStore(tmp_path / "server"), _ProfileFaces(), host="127.0.0.1", port=port, heartbeat_s=5)
+        loop_thread.run(hub.start())
+        return hub
+
+    hub = start_hub()
+    port = hub.bound_port
+    faces = lambda: [m for m in sim.received if m.get("type") == "face"]  # noqa: E731
+    try:
+        sim = make_sim(f"ws://127.0.0.1:{port}/gadget")
+        assert sim.wait_screen("ready", timeout=10)
+        assert sim.wait_for(lambda: faces(), timeout=5)
+        held = faces()[0]["hash"]
+        welcomes = len([m for m in sim.received if m.get("type") == "welcome"])
+        loop_thread.run(hub.stop())
+        hub = start_hub(port)  # a new process: it has never sent this device anything
+        assert sim.wait_for(lambda: len([m for m in sim.received if m.get("type") == "welcome"]) > welcomes, timeout=15)
+        assert sim.wait_screen("ready", timeout=5)
+        assert sim.last_received("welcome")["face"] == held  # kept: no mascot at Ready
+        sim.run_for(0.3)
+        assert len(faces()) == 1  # and not sent again
+        assert _held_face(sim) == held
+    finally:
+        loop_thread.run(hub.stop())
+
+
+class _OnReady(_TwoProfiles):
+    """The profiles in ``with_face`` have a face; ``on_ready`` can switch the device to another profile
+    or unpair it, as the gateway may before the face work after the welcome has begun."""
+
+    def __init__(self, with_face=("ops",)):
+        self.with_face = with_face
+        self.switch_to = None
+        self.unpair = False
+
+    async def face(self, session):
+        return ProfileFace.of(_face(0x0F)) if session.profile in self.with_face else None
+
+    async def on_ready(self, session):
+        if self.switch_to:
+            await self.select_profile(session, self.switch_to)
+            await session.send_profile()
+        if self.unpair:
+            await session.set_paired(False)
+
+
+def _hub(loop_thread, tmp_path, delegate):
+    from hermes_gadget_plugin.hub import DeviceHub
+    from hermes_gadget_plugin.store import DeviceStore
+
+    hub = DeviceHub(DeviceStore(tmp_path / "server"), delegate, host="127.0.0.1", port=0, heartbeat_s=5)
+    loop_thread.run(hub.start())
+    return hub
+
+
+def test_a_switch_before_the_face_work_starts_installs_no_old_face(loop_thread, tmp_path, make_sim):
+    delegate = _OnReady()
+    hub = _hub(loop_thread, tmp_path, delegate)
+    try:
+        sim = make_sim(f"ws://127.0.0.1:{hub.bound_port}/gadget")
+        assert sim.wait_screen("ready", timeout=10)
+        device = hub.get(sim.status()["device_id"])
+        loop_thread.run(delegate.select_profile(device, "ops"))
+        loop_thread.run(device.send_profile())
+        assert sim.wait_for(lambda: (sim.last_received("face") or {}).get("bits"), timeout=5)
+        ops = _digest(_face(0x0F))
+        assert _held_face(sim) == ops
+
+        delegate.switch_to = "default"  # the next connection switches before its face work starts
+        sim.console("reconnect")
+        assert sim.wait_for(lambda: sim.status().get("profile") == "default", timeout=10)
+        sim.run_for(0.5)
+        delegate.switch_to = None
+        assert _held_face(sim) is None  # default has no face: the mascot, not ops's face
+    finally:
+        loop_thread.run(hub.stop())
+
+
+def test_an_unpair_before_the_face_work_starts_sends_no_face(loop_thread, tmp_path, make_sim):
+    delegate = _OnReady(with_face=("default",))
+    delegate.unpair = True  # after the welcome found default's face, before the face work starts
+    hub = _hub(loop_thread, tmp_path, delegate)
+    try:
+        sim = make_sim(f"ws://127.0.0.1:{hub.bound_port}/gadget")
+        assert sim.wait_for(lambda: sim.last_received("unpaired"), timeout=10)
+        sim.run_for(0.5)
+        assert not any("bits" in m for m in sim.received if m.get("type") == "face")
+        assert sim.status()["paired"] is False
+    finally:
+        loop_thread.run(hub.stop())
+
+
+def test_a_closed_connection_leaves_no_face_work_behind(loop_thread, tmp_path, make_sim):
+    import asyncio
+    import time
+
+    delegate = _SlowLookup()
+    hub = _hub(loop_thread, tmp_path, delegate)
+    try:
+        delegate.found = asyncio.Event()  # never set: the lookup never finishes
+        sim = make_sim(f"ws://127.0.0.1:{hub.bound_port}/gadget")
+        assert sim.wait_screen("ready", timeout=8)
+        assert hub._tasks  # the face work, still looking
+        sim.close()
+        deadline = time.monotonic() + 5
+        while (hub.sessions or hub._tasks) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not hub.sessions and not hub._tasks
+    finally:
+        loop_thread.loop.call_soon_threadsafe(delegate.found.set)
+        loop_thread.run(hub.stop())
+
+
+class _SlowOps(_TwoProfiles):
+    """Finding ops's face waits for ``found``; texts are kept."""
+
+    def __init__(self):
+        self.found = None  # an asyncio.Event
+        self.texts = []
+
+    async def face(self, session):
+        if session.profile == "ops":
+            await self.found.wait()
+        return None
+
+    async def on_text(self, session, msg_id, text):
+        self.texts.append(text)
+
+
+def test_messages_are_read_while_a_switched_profiles_face_is_looked_up(loop_thread, tmp_path, make_sim):
+    import asyncio
+
+    delegate = _SlowOps()
+    hub = _hub(loop_thread, tmp_path, delegate)
+    try:
+        delegate.found = asyncio.Event()  # never set
+        sim = make_sim(f"ws://127.0.0.1:{hub.bound_port}/gadget")
+        assert sim.wait_screen("ready", timeout=10)
+        sim.console("settings")  # the device asks for ops, whose face never comes
+        for _ in range(3):
+            sim.console("cancel")
+        sim.console("talk")
+        sim.console("release")
+        sim.console("settings close")
+        assert sim.wait_for(lambda: sim.status().get("profile") == "ops", timeout=5)
+        sim.type_text("still here?")
+        assert sim.wait_for(lambda: delegate.texts == ["still here?"], timeout=5)
+    finally:
+        loop_thread.loop.call_soon_threadsafe(delegate.found.set)
+        loop_thread.run(hub.stop())
+
+
+class _HeldLookup(_TwoProfiles):
+    """Both profiles have a face. Arming ``hold`` (an asyncio.Event) holds the next lookup until it is set."""
+
+    def __init__(self):
+        self.faces = {"ops": _face(0x0F), "default": _face(0x3C)}
+        self.hold = None
+        self.waiting = False
+
+    async def face(self, session):
+        if self.hold is not None:
+            hold, self.hold = self.hold, None
+            self.waiting = True
+            await hold.wait()
+        return ProfileFace.of(self.faces[session.profile]) if session.profile in self.faces else None
+
+
+def test_a_profile_reset_during_the_welcome_lookup_leaves_the_device_its_face(loop_thread, tmp_path, make_sim):
+    """A reset sends the default face before the welcome, and the welcome then drops it: it is sent again."""
+    import asyncio
+
+    delegate = _HeldLookup()
+    hub = _hub(loop_thread, tmp_path, delegate)
+    default = _digest(delegate.faces["default"])
+    try:
+        sim = make_sim(f"ws://127.0.0.1:{hub.bound_port}/gadget")
+        assert sim.wait_screen("ready", timeout=10)
+        device_id = sim.status()["device_id"]
+        loop_thread.run(delegate.select_profile(hub.get(device_id), "ops"))
+        loop_thread.run(hub.get(device_id).send_profile())
+        assert sim.wait_for(lambda: (sim.last_received("face") or {}).get("profile") == "ops", timeout=5)
+
+        hold = delegate.hold = asyncio.Event()
+        welcomes = len([m for m in sim.received if m.get("type") == "welcome"])
+        sim.console("reconnect")
+        assert sim.wait_for(lambda: delegate.waiting, timeout=10)
+
+        async def reset():  # as the plugin resets a stored profile it no longer serves
+            session = hub.get(device_id)
+            session.profile = "default"
+            await session.send_profile()
+        loop_thread.run(reset())
+        assert sim.wait_for(lambda: (sim.last_received("face") or {}).get("hash") == default, timeout=5)
+        loop_thread.loop.call_soon_threadsafe(hold.set)
+        assert sim.wait_for(lambda: len([m for m in sim.received if m.get("type") == "welcome"]) > welcomes, timeout=10)
+        sim.run_for(0.5)
+        assert _held_face(sim) == default
+    finally:
+        if delegate.hold:
+            loop_thread.loop.call_soon_threadsafe(delegate.hold.set)
+        loop_thread.run(hub.stop())
+
+
+def test_an_unpair_and_a_quick_reapproval_leave_the_device_its_face(loop_thread, tmp_path, make_sim):
+    import asyncio
+
+    delegate = _HeldLookup()
+    hub = _hub(loop_thread, tmp_path, delegate)
+    default = _digest(delegate.faces["default"])
+    try:
+        sim = make_sim(f"ws://127.0.0.1:{hub.bound_port}/gadget")
+        assert sim.wait_screen("ready", timeout=10)
+        assert sim.wait_for(lambda: (sim.last_received("face") or {}).get("hash") == default, timeout=5)
+        session = hub.get(sim.status()["device_id"])
+
+        async def revoke_and_reapprove():  # before the face work of the revocation has run
+            await session.set_paired(False)
+            await session.set_paired(True)
+            await asyncio.gather(session._face_task, return_exceptions=True)
+        loop_thread.run(revoke_and_reapprove())
+        assert sim.wait_for(lambda: sim.status()["paired"] is True, timeout=5)
+        sim.run_for(0.5)
+        assert _held_face(sim) == default
+    finally:
+        loop_thread.run(hub.stop())
+
+
+def _announce_default_again(loop_thread, tmp_path, make_sim, remove_face):
+    """Settles default's face, announces default again, and returns the face messages it caused and the
+    face the device then holds. ``remove_face`` removes default's face file and avatar first."""
+    delegate = _HeldLookup()
+    hub = _hub(loop_thread, tmp_path, delegate)
+    faces = lambda: [m for m in sim.received if m.get("type") == "face"]  # noqa: E731
+    try:
+        sim = make_sim(f"ws://127.0.0.1:{hub.bound_port}/gadget")
+        assert sim.wait_screen("ready", timeout=10)
+        assert sim.wait_for(lambda: faces() and faces()[-1].get("hash") == _digest(delegate.faces["default"]),
+                            timeout=5)
+        sent = len(faces())
+        if remove_face:
+            del delegate.faces["default"]
+        loop_thread.run(hub.get(sim.status()["device_id"]).send_profile())  # the profile it is already on
+        sim.run_for(0.5)
+        return faces()[sent:], _held_face(sim)
+    finally:
+        loop_thread.run(hub.stop())
+
+
+def test_announcing_the_same_profile_again_does_not_resend_its_face(loop_thread, tmp_path, make_sim):
+    """The device keeps its face when the profile it is on is announced again, so the hub must too."""
+    caused, held = _announce_default_again(loop_thread, tmp_path, make_sim, remove_face=False)
+    assert caused == [] and held == _digest(_face(0x3C))
+
+
+def test_announcing_the_same_profile_again_clears_a_face_whose_source_is_gone(loop_thread, tmp_path, make_sim):
+    caused, held = _announce_default_again(loop_thread, tmp_path, make_sim, remove_face=True)
+    assert [("bits" in m) for m in caused] == [False]  # one explicit clear
+    assert held is None
+
+
+def test_a_server_without_profiles_sends_no_roster(devserver, make_sim):
+    # Server side of compatibility; old firmware against a capable adapter is in test_profile_select_hermes.py.
+    hub, _brain, url = devserver()  # EchoBrain keeps the default hooks: no profiles
+    sim = make_sim(url)
+    assert sim.wait_screen("ready", timeout=10)
+    welcome = sim.last_received("welcome")
+    assert "profile" not in welcome and "profiles" not in welcome
+    assert hub.get(sim.status()["device_id"]).profile == "default"
+
+
+def _timer_events(brain):
+    """Records the device's events the hub passes to the brain; returns the list."""
+    events = []
+
+    async def on_event(session, name, data, notify):
+        events.append((name, data, notify))
+
+    brain.on_event = on_event
+    return events
+
+
+def test_timer_runs_and_rings_through_the_hub(loop_thread, devserver, make_sim):
+    import asyncio
+
+    hub, brain, url = devserver()
+    events = _timer_events(brain)
+    sim = make_sim(url, board="sim-466x466-round")
+    assert sim.wait_screen("ready", timeout=10)
+    session = next(iter(hub.sessions.values()))
+    assert {"timer.start", "timer.status", "timer.cancel"} <= set(session.action_names())
+
+    # The device answers on its own thread, so step the simulator while the hub waits.
+    started = asyncio.run_coroutine_threadsafe(session.invoke_action("timer.start", {"seconds": 1, "label": "Pasta"}),
+                                               loop_thread.loop)
+    assert sim.wait_for(started.done, timeout=5)
+    assert started.result() == {"seconds": 1, "label": "Pasta"}
+    assert sim.wait_for(lambda: any(name == "timer.done" for name, _, _ in events), timeout=5)
+    name, data, notify = next(e for e in events if e[0] == "timer.done")
+    assert data == {"label": "Pasta"} and notify is False
+    assert sim.wait_screen("alarm", timeout=3)
+
+    sim.tap("talk")  # a press stops the alarm; it records nothing
+    assert sim.wait_screen("ready", timeout=3)
+    assert not any(m.get("type") == "audio.start" for m in sim.sent[-5:])
+
+
+def test_agent_sets_the_face_expression_through_the_hub(loop_thread, devserver, make_sim, tmp_path):
+    import asyncio
+
+    hub, _brain, url = devserver()
+    sim = make_sim(url)
+    assert sim.wait_screen("ready", timeout=10)
+    session = next(iter(hub.sessions.values()))
+    assert "face.set" in session.action_names()
+    sim.run_for(0.3)
+    neutral = sim.screenshot(tmp_path / "neutral.png").read_bytes()
+
+    def call(args):
+        # The device answers on its own thread, so step the simulator while the hub waits.
+        future = asyncio.run_coroutine_threadsafe(session.invoke_action("face.set", args), loop_thread.loop)
+        assert sim.wait_for(future.done, timeout=5)
+        return future
+
+    shots = {"neutral": neutral}
+    for name in ("happy", "confused", "alert", "sleepy"):
+        assert call({"expression": name}).result() == {"expression": name}
+        assert sim.status()["expression"] == name
+        sim.run_for(0.3)
+        shots[name] = sim.screenshot(tmp_path / f"{name}.png").read_bytes()
+    assert len(set(shots.values())) == 5  # each one draws a face of its own
+
+    assert "expression must be one of" in str(call({"expression": "furious"}).exception())
+    assert sim.status()["expression"] == "sleepy"  # a refused call leaves the face alone
+
+    # With seconds it goes back to neutral by itself.
+    assert call({"expression": "alert", "seconds": 1}).result() == {"expression": "alert", "seconds": 1}
+    assert sim.wait_for(lambda: "expression" not in sim.status(), timeout=3)
+
+    assert "seconds must be between 1 and 3600" in str(call({"expression": "happy", "seconds": 2.9}).exception())
+
+    # Without them it lasts until the user's next turn.
+    assert call({"expression": "happy"}).result() == {"expression": "happy"}
+    sim.run_for(1.5)
+    assert sim.status()["expression"] == "happy"
+    sim.type_text("hello")
+    assert sim.wait_screen("thinking", "responding", timeout=5)
+    assert "expression" not in sim.status()
+
+
+class _Thumbs(_TwoProfiles):
+    """Three profiles; ``colours`` gives each one with a thumbnail its colour, named by it."""
+
+    def __init__(self):
+        self.colours = {"ops": (20, 170, 160), "lab": (220, 60, 120)}
+        self.loads = []
+
+    def profiles(self, session=None):
+        return [{"id": "default", "name": "Default"}, {"id": "ops", "name": "Ops"}, {"id": "lab", "name": "Lab"}]
+
+    async def thumb(self, session, profile):
+        if profile not in self.colours:
+            return None
+        r, g, b = self.colours[profile]
+        px = session.thumb_px
+
+        def load():
+            self.loads.append(profile)
+            return struct.pack("<H", (r & 0xF8) << 8 | (g & 0xFC) << 3 | b >> 3) * (px * px)
+
+        return ProfileFace(f"{profile}-{r}-{g}-{b}-{px}", load)
+
+
+def _rgb565(rgb) -> int:
+    r, g, b = rgb
+    return (r & 0xF8) << 8 | (g & 0xFC) << 3 | b >> 3
+
+
+def test_profile_thumbnails_reach_the_grid_once_and_follow_changes(loop_thread, tmp_path, make_sim):
+    delegate = _Thumbs()
+    hub = _hub(loop_thread, tmp_path, delegate)
+    thumbs = lambda kind="face.thumb.start": [m for m in sim.received if m.get("type") == kind]  # noqa: E731
+    try:
+        sim = make_sim(f"ws://127.0.0.1:{hub.bound_port}/gadget", board="sim-410x486")
+        assert sim.wait_screen("ready", timeout=10)
+        hello = [m for m in sim.sent if m.get("type") == "hello"][-1]
+        px = hello["caps"]["faces"]["thumbs"]
+        assert 32 <= px <= 128 and hello["thumbs"] == {}
+        assert sim.wait_for(lambda: len(thumbs()) == 2, timeout=5)
+        assert {m["profile"] for m in thumbs()} == {"ops", "lab"} and all(m["width"] == px for m in thumbs())
+
+        sim.touch(True, 300, 240)  # a swipe from right to left opens the grid
+        for x in (260, 220, 180, 140):
+            sim.run_for(0.02)
+            sim.touch(True, x, 240)
+        sim.touch(False)
+        assert sim.wait_screen("profiles", timeout=3)
+        sim.run_for(0.3)
+        pixels = array("H", sim.device.framebuffer_rows())
+        assert pixels.count(_rgb565(delegate.colours["ops"])) > 1000
+        assert pixels.count(_rgb565(delegate.colours["lab"])) > 1000
+
+        # A reconnect names both, and nothing is sent again.
+        sim.console("reconnect")
+        assert sim.wait_for(lambda: len([m for m in sim.sent if m.get("type") == "hello"]) == 2, timeout=10)
+        assert set([m for m in sim.sent if m.get("type") == "hello"][-1]["thumbs"]) == {"ops", "lab"}
+        assert sim.wait_screen("ready", timeout=10)
+        sim.run_for(0.5)
+        assert len(thumbs()) == 2 and len(delegate.loads) == 2
+
+        # Ops's avatar changes: only its thumbnail goes again. Lab's goes away: a clear.
+        delegate.colours["ops"] = (240, 200, 40)
+        del delegate.colours["lab"]
+        session = hub.get(sim.status()["device_id"])
+        loop_thread.loop.call_soon_threadsafe(session.update_thumbs)
+        assert sim.wait_for(lambda: len(thumbs()) == 3 and thumbs("face.thumb"), timeout=5)
+        assert thumbs()[-1]["profile"] == "ops" and thumbs("face.thumb") == [{"type": "face.thumb", "profile": "lab"}]
+        sim.run_for(0.3)
+        sim.console("reconnect")
+        assert sim.wait_for(lambda: len([m for m in sim.sent if m.get("type") == "hello"]) == 3, timeout=10)
+        held = [m for m in sim.sent if m.get("type") == "hello"][-1]["thumbs"]
+        assert held == {"ops": f"ops-240-200-40-{px}"}
+    finally:
+        loop_thread.run(hub.stop())
+
+
+class _BrokenThumbs(_Thumbs):
+    """Ops's picture cannot be read and Lab's comes out the wrong size, until ``fixed``."""
+
+    def __init__(self):
+        super().__init__()
+        self.fixed = False
+
+    async def thumb(self, session, profile):
+        face = await super().thumb(session, profile)
+        if face is None or self.fixed:
+            return face
+        loads = self.loads
+
+        def broken():
+            loads.append(profile)
+            if profile == "ops":
+                raise OSError("truncated file")
+            return b"\0" * 10
+
+        return ProfileFace(face.hash, broken)
+
+
+def test_a_thumbnail_that_cannot_be_made_is_tried_once_per_hash(loop_thread, tmp_path, make_sim):
+    delegate = _BrokenThumbs()
+    hub = _hub(loop_thread, tmp_path, delegate)
+    thumbs = lambda: [m for m in sim.received if m.get("type") == "face.thumb.start"]  # noqa: E731
+    try:
+        sim = make_sim(f"ws://127.0.0.1:{hub.bound_port}/gadget", board="sim-410x486")
+        assert sim.wait_screen("ready", timeout=10)
+        assert sim.wait_for(lambda: sorted(delegate.loads) == ["lab", "ops"], timeout=5)
+        session = hub.get(sim.status()["device_id"])
+        for _ in range(3):  # pairing checks with the same pictures: neither is read again
+            task = loop_thread.run(_call(session.update_thumbs))
+            assert sim.wait_for(task.done, timeout=5)
+        assert sorted(delegate.loads) == ["lab", "ops"] and not thumbs()
+
+        delegate.colours["ops"] = (240, 200, 40)  # new pictures: tried again, and sent once they read
+        delegate.colours["lab"] = (60, 60, 220)
+        delegate.fixed = True
+        task = loop_thread.run(_call(session.update_thumbs))
+        assert sim.wait_for(task.done, timeout=5)
+        assert sim.wait_for(lambda: {m["profile"] for m in thumbs()} == {"ops", "lab"}, timeout=5)
+    finally:
+        loop_thread.run(hub.stop())
+
+
+async def _call(fn):
+    return fn()
+
+
+def test_a_profile_no_longer_offered_gets_no_thumbnail_until_the_next_welcome(loop_thread, tmp_path, make_sim):
+    delegate = _Thumbs()
+    hub = _hub(loop_thread, tmp_path, delegate)
+    thumbs = lambda: [m for m in sim.received if m.get("type") == "face.thumb.start"]  # noqa: E731
+    try:
+        sim = make_sim(f"ws://127.0.0.1:{hub.bound_port}/gadget", board="sim-410x486")
+        assert sim.wait_screen("ready", timeout=10)
+        assert sim.wait_for(lambda: len(thumbs()) == 2, timeout=5)
+        session = hub.get(sim.status()["device_id"])
+        delegate.colours["ops"] = (240, 200, 40)  # both pictures change, but Lab was parked meanwhile
+        delegate.colours["lab"] = (60, 60, 220)
+        delegate.loads.clear()
+        task = loop_thread.run(_call(lambda: session.update_thumbs({"default", "ops"})))
+        assert sim.wait_for(task.done, timeout=5)
+        assert sim.wait_for(lambda: len(thumbs()) == 3, timeout=5)
+        sim.run_for(0.3)
+        assert thumbs()[-1]["profile"] == "ops" and len(thumbs()) == 3
+        assert delegate.loads == ["ops"]  # Lab's picture is not even read
+        assert not [m for m in sim.received if m.get("type") == "face.thumb"]
+    finally:
+        loop_thread.run(hub.stop())
+
+
+def test_a_thumbnail_lookup_that_fails_keeps_what_the_device_shows(loop_thread, tmp_path, make_sim):
+    delegate = _Thumbs()
+    hub = _hub(loop_thread, tmp_path, delegate)
+    try:
+        sim = make_sim(f"ws://127.0.0.1:{hub.bound_port}/gadget", board="sim-410x486")
+        assert sim.wait_screen("ready", timeout=10)
+        assert sim.wait_for(lambda: len([m for m in sim.received if m.get("type") == "face.thumb.start"]) == 2,
+                            timeout=5)
+        session = hub.get(sim.status()["device_id"])
+
+        async def broken(session, profile):  # say, a profile tree that can't be read after a restart
+            raise OSError("unreadable")
+
+        delegate.thumb = broken
+        task = loop_thread.run(_call(session.update_thumbs))
+        assert sim.wait_for(task.done, timeout=5)
+        sim.run_for(0.3)
+        assert not [m for m in sim.received if m.get("type") == "face.thumb"]  # no clear
+        assert set(session.thumb_hashes) == {"ops", "lab"}
+    finally:
+        loop_thread.run(hub.stop())
+
+
+def test_a_board_without_a_touchscreen_or_room_gets_no_thumbnails(loop_thread, tmp_path, make_sim):
+    delegate = _Thumbs()
+    hub = _hub(loop_thread, tmp_path, delegate)
+    try:
+        sim = make_sim(f"ws://127.0.0.1:{hub.bound_port}/gadget")  # buttons only
+        assert sim.wait_screen("ready", timeout=10)
+        hello = [m for m in sim.sent if m.get("type") == "hello"][-1]
+        faces = hello["caps"].get("faces")
+        assert not isinstance(faces, dict) or "thumbs" not in faces
+        assert "thumbs" not in hello
+        sim.run_for(0.5)
+        assert not [m for m in sim.received if m.get("type", "").startswith("face.thumb")]
+        assert hub.get(sim.status()["device_id"]).thumb_px == 0
+    finally:
+        loop_thread.run(hub.stop())
+
+
+@pytest.mark.parametrize("board", ["sim-360x360-knob", "sim-480x480-round-nospeaker"])
+def test_timer_on_a_board_without_a_speaker_shows_the_alarm_silently(loop_thread, devserver, make_sim, board):
+    import asyncio
+
+    hub, brain, url = devserver()
+    events = _timer_events(brain)
+    sim = make_sim(url, board=board)
+    assert sim.wait_screen("ready", timeout=10)
+    session = next(iter(hub.sessions.values()))
+    assert {"timer.start", "timer.status", "timer.cancel"} <= set(session.action_names())
+    assert session.has_speaker is False
+
+    started = asyncio.run_coroutine_threadsafe(session.invoke_action("timer.start", {"seconds": 1}), loop_thread.loop)
+    assert sim.wait_for(started.done, timeout=5)
+    assert sim.wait_screen("alarm", timeout=5)
+    assert sim.wait_for(lambda: any(name == "timer.done" for name, _, _ in events), timeout=5)

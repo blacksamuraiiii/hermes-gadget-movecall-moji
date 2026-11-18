@@ -22,9 +22,17 @@ extern "C" {
 #define HGSIM_API __attribute__((visibility("default")))
 #endif
 
-#define HGSIM_ABI_VERSION 7
+#define HGSIM_ABI_VERSION 8
 
 typedef struct hgsim hgsim;
+
+/* Local wall-clock time (see hg::WallTime). */
+typedef struct hgsim_wall_time {
+  int year, month, day; /* month 1-12, day 1-31 */
+  int weekday;          /* 0 = Sunday */
+  int hour, minute, second;
+} hgsim_wall_time;
+
 
 typedef struct hgsim_host {
   void* user;
@@ -62,6 +70,8 @@ typedef struct hgsim_host {
   void (*update_abort)(void* user);
   void (*update_restart)(void* user);
   void (*update_confirm)(void* user);
+  /* local time of day; return 1 and fill `out` when known, 0 otherwise */
+  int (*wall_time)(void* user, hgsim_wall_time* out);
 } hgsim_host;
 
 typedef struct hgsim_config {
@@ -87,14 +97,7 @@ typedef struct hgsim_config {
   size_t update_capacity; /* bytes the update slot holds; 0 = no over-the-air updates */
   int update_pending;     /* this boot runs an installed update that isn't confirmed yet */
   int has_power;         /* explicitly supplied simulated power readings */
-  /* Layout knobs the real boards set (see hg::DisplayInfo and hg::DeviceProfile). */
-  int round_area_permille; /* 0 keeps the inscribed square (707) */
-  int no_bottom_bar;       /* the board has no button hints to show */
-  int no_top_band;         /* no touch: the header line starts at the top of the area */
-  int body_rows_cap;       /* most body lines a text screen may use; 0 = no cap */
-  int robot_face;          /* draw the board's own robot face instead of the mascot */
-  int emoji_face;          /* draw the board's own pure-emoji face instead */
-  const char* greeting;    /* idle headline; NULL keeps the translated default */
+  int motion;            /* an accelerometer feeds hgsim_motion (face-down sleep) */
 } hgsim_config;
 
 /* Action handler: fill `result_json` (a JSON object) and return 1, or write an
@@ -119,6 +122,8 @@ HGSIM_API void hgsim_transport_closed(hgsim* sim, const char* reason);
 HGSIM_API void hgsim_button(hgsim* sim, int button, int pressed);
 /* Touchscreen sample in screen pixels; touching = 0 when the finger lifts. */
 HGSIM_API void hgsim_touch(hgsim* sim, int touching, int x, int y);
+/* Accelerometer sample in milli-g, device frame (+z out of the screen); send a few per second. */
+HGSIM_API void hgsim_motion(hgsim* sim, int x_mg, int y_mg, int z_mg);
 HGSIM_API void hgsim_mic_samples(hgsim* sim, const int16_t* samples, size_t count);
 HGSIM_API void hgsim_submit_text(hgsim* sim, const char* text);
 HGSIM_API void hgsim_set_sensor(hgsim* sim, const char* name, double value);

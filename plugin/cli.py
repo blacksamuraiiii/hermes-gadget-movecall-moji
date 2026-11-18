@@ -13,6 +13,8 @@ from urllib.parse import quote
 # The browser installer: flashes a board over USB and gives it Wi-Fi and this Hermes's address.
 INSTALLER_URL = "https://adolanium.github.io/hermes-gadget-sdk/"
 PAIR_TIMEOUT_S = 300
+DIAG_TIMEOUT_S = 20.0  # the gateway's poll, then up to 8 s for the device
+INTERPRET_TIMEOUT_S = 10.0
 
 
 def _store():
@@ -97,6 +99,11 @@ def _cmd_forget(args) -> None:
         return
     store.forget(device_id)
     print(f"Forgot the key for {device_id}; the device will re-enroll on its next connection.")
+    try:
+        if _tiles().clear_widgets(device=device_id):
+            print("Removed the widgets set for it. Widgets set for every gadget stay.")
+    except OSError as exc:
+        print(f"Could not remove the widgets set for it: {exc}")
     print(f"To also remove its chat approval: hermes pairing revoke gadget {device_id}")
 
 
@@ -190,6 +197,146 @@ def _cmd_update(args) -> None:
             sys.exit(f"The update failed: {status.get('error')}")
         time.sleep(1)
     print("Still waiting. The update stays staged and installs once the gateway sees the device online.")
+
+
+def _cmd_bot_chat(args) -> None:
+    """Put a gadget in a profile's Bot Chat, where that profile can message the other Bots."""
+    from . import status as live_status
+    from .botchat import BOT_CHAT_TITLE, REQUEST_TTL_S, VIRTUAL_HINT, BotChatQueue, bot_chat_row
+
+    store = _store()
+    device_id = _match(store, args.device)
+    if device_id is None:
+        sys.exit(1)
+    name = store.devices()[device_id].get("name") or device_id
+    profile = args.profile
+    extra = _gadget_extra()
+    try:
+        from hermes_cli.profiles import get_profile_dir
+
+        home = Path(get_profile_dir(profile))
+    except Exception as exc:
+        sys.exit(f"Can't find profile {profile!r}: {exc}")
+    if not home.is_dir():
+        sys.exit(f"There is no profile {profile!r}. See: hermes profile list")
+    row = bot_chat_row(home / "state.db")
+    if row is None:
+        sys.exit(f"Profile {profile!r} has no {BOT_CHAT_TITLE!r} yet. Add it as a Bot in Hermes Desktop's Bots pane, or "
+                 f"run: hermes -p {profile} chat -c \"{BOT_CHAT_TITLE}\" --create-if-missing")
+    admins = {str(a).strip() for a in (extra.get("allow_admin_from") or []) if str(a).strip()}
+    if device_id not in admins:
+        sys.exit(f"Hermes lets a gadget take over a Bot Chat only when the gadget is an admin of the gadget "
+                 f"platform. Add it in the default profile's config.yaml, then restart the gateway:\n\n"
+                 f"  platforms:\n    gadget:\n      extra:\n        allow_admin_from: [{device_id}]\n\n"
+                 f"With that list set, other gadgets keep only /help and /whoami; add "
+                 f"user_allowed_commands: [new, stop] so they can still start a new conversation.")
+    if profile != "default":
+        offered = extra.get("profiles")
+        offers = (isinstance(offered, str) and offered.strip().lower() == "all") or (
+            isinstance(offered, list) and profile in {str(p).strip() for p in offered})
+        if not offers:
+            sys.exit(f"{name} can only talk to {profile!r} when the gadget offers it: add it to "
+                     f"platforms.gadget.extra.profiles (or set profiles: all). {VIRTUAL_HINT}")
+    virtual = str(extra.get("profile_mode") or "").strip().lower() == "virtual" and profile != "default"
+    expected = f"{device_id}~{profile}" if virtual else device_id
+    # Already there only when the Bot Chat is on the device's chat for that profile AND the device is on
+    # that profile now (the gateway's live status): a device that moved on is switched back.
+    live = live_status.read(store.path.parent)["devices"].get(device_id) or {}
+    if row.get("source") == "gadget" and row.get("chat_id") == expected and live.get("profile") == profile:
+        print(f"{name} is already in {profile}'s {BOT_CHAT_TITLE}.")
+        return
+
+    queue = BotChatQueue(store.path.parent)
+    request_id = queue.request(device_id, profile)
+    print(f"Asked the gateway to move {profile}'s {BOT_CHAT_TITLE} onto {name}. It runs once {name} is "
+          f"online and idle; this waits {int(args.timeout)} s, and the gateway keeps the request for "
+          f"{REQUEST_TTL_S // 60} minutes. Ctrl+C stops waiting.")
+    deadline, chat_id = time.monotonic() + args.timeout, None
+    while time.monotonic() < deadline:
+        status = queue.status(device_id) or {}
+        if status.get("id") != request_id:  # nothing yet, or another run's report
+            time.sleep(1)
+            continue
+        if status.get("state") == "failed":
+            sys.exit(f"It didn't work: {status.get('error')}")
+        if status.get("state") == "sent":
+            chat_id = status.get("chat_id")
+            row = bot_chat_row(home / "state.db") or {}
+            if row.get("chat_id") == chat_id and row.get("source") == "gadget":
+                print(f"Done: {name} on {profile} now talks in {profile}'s {BOT_CHAT_TITLE}. Ask it to talk to "
+                      f"the other Bots, e.g. \"ask the others what they think\". Hermes Desktop shows the same "
+                      f"conversation.")
+                return
+        time.sleep(1)
+    if chat_id is None:
+        sys.exit(f"Stopped waiting: {name} wasn't online and idle within {int(args.timeout)} s. The gateway "
+                 f"still serves the request when it is, until {REQUEST_TTL_S // 60} minutes after this run began; "
+                 f"running the command again replaces it with a new attempt.")
+    sys.exit(f"The command reached {name}, but {profile}'s {BOT_CHAT_TITLE} didn't move. The reply on the gadget "
+             f"says why; often {profile} hasn't approved the gadget yet (hermes -p {profile} pairing list). "
+             f"'hermes logs' has the gateway's side.")
+
+
+def _cmd_diag(args) -> None:
+    from .desk import Desk
+
+    store = _store()
+    device_id = _match(store, args.device)
+    if device_id is None:
+        sys.exit(1)
+    desk = Desk(store.path.parent)
+    try:
+        req = desk.post(device_id, "diag")
+    except ValueError as exc:
+        sys.exit(f"Can't ask for a report: {exc}")
+    print("Asking the gateway for the report...")
+    outcome = desk.wait(req, DIAG_TIMEOUT_S)
+    if not outcome.get("ok"):
+        sys.exit(str(outcome.get("error") or "The report could not be taken."))
+    path = Path(args.out) if args.out else Path(str(outcome.get("file") or "hermes-gadget-diag.txt"))
+    try:
+        path.write_text(str(outcome.get("text") or ""), encoding="utf-8")
+    except OSError as exc:
+        sys.exit(f"Can't save the report to {path}: {exc}")
+    print(f"Saved the report to {path}. Attach it when you open an issue.")
+
+
+def _cmd_interpret(args) -> None:
+    """Turn a connected gadget into an interpreter between two languages, or back."""
+    from .desk import Desk
+
+    store = _store()
+    device_id = _match(store, args.device)
+    if device_id is None:
+        sys.exit(1)
+    name = store.devices()[device_id].get("name") or device_id
+    langs = list(args.languages)
+    off = [word.lower() for word in langs] == ["off"]
+    if not off and len(langs) != 2:
+        sys.exit("Give two languages, e.g. hermes gadget interpret kitchen es en, or 'off' to stop.")
+    desk = Desk(store.path.parent)
+    try:
+        req = (desk.post(device_id, "interpret", off=True) if off
+               else desk.post(device_id, "interpret", a=langs[0], b=langs[1]))
+    except ValueError as exc:
+        sys.exit(f"Can't start the interpreter: {exc}")
+    outcome = desk.wait(req, INTERPRET_TIMEOUT_S)
+    if not outcome.get("ok"):
+        sys.exit(str(outcome.get("error") or "The gateway refused."))
+    if off:
+        print(f"{name} is no longer interpreting." if outcome.get("was_on") else f"{name} was not interpreting.")
+        return
+    print(f"{name} is interpreting: {outcome.get('label')}. Hold its talk control and speak; it "
+          + ("says and shows" if outcome.get("speaks") else "shows") + " the translation.")
+    print("The speakers take turns, the first language first. A short press of CANCEL on the gadget "
+          "switches who speaks next.")
+    if not outcome.get("speaks"):
+        print("This gadget does not speak (no speaker, or voice is off): a translation in a script its "
+              "screen can't draw is lost.")
+    if not outcome.get("draws"):
+        print("This gadget's firmware doesn't draw the interpreter screen: translations appear as replies, "
+              "and only this command switches who speaks next.")
+    print(f"Stop with: hermes gadget interpret {args.device} off   (or hold CANCEL on the gadget)")
 
 
 def _cmd_info(args) -> None:
@@ -304,49 +451,53 @@ def _cmd_tile(args) -> None:
             print(f"{tile['id']:<16} {tile['label']:<16} {tile['value']:<16} {tile.get('state', '-')}")
 
 
-def _cards():
-    from plugins.plugin_storage import plugin_data_dir
-
-    from .dashboard import CardStore
-
-    return CardStore(plugin_data_dir("gadget"))
-
-
-def _cmd_show(args) -> None:
-    """Put a card on a gadget's screen without starting a turn."""
-    store = _store()
-    device_id = _match(store, args.device)
-    if device_id is None:
-        return
-    try:
-        card = _cards().set(args.title, args.body or "", ttl_s=args.ttl, target=device_id)
-    except ValueError as exc:
-        sys.exit(str(exc))
-    shown = card["title"] or card["body"]
-    print(f"Card queued for {args.device}: {shown} ({card['ttl_s']:.0f} s on screen).")
-    print("It shows within a few seconds while the gateway runs and the gadget is connected.")
+def _widget_kind(args) -> str:
+    """The widget kind the options given describe; exits when they describe none, or two."""
+    kinds = [kind for kind, given in (("value", args.value is not None), ("progress", args.percent is not None),
+                                      ("list", bool(args.item)), ("headline", args.title is not None)) if given]
+    if len(kinds) != 1:
+        sys.exit("Give one of --value, --percent, --item or --title: it decides what the widget shows.")
+    return kinds[0]
 
 
-def _cmd_weather(args) -> None:
-    """Fetch the forecast and put it on a gadget's screen (and print it)."""
-    from . import weather
+def _cmd_widget(args) -> None:
+    from .dashboard import ALL_DEVICES, widget_summary
 
-    try:
-        title, body = weather.card(days=args.days, place=args.place)
-    except weather.WeatherError as exc:
-        sys.exit(f"weather: {exc}")
-    print(f"{title}\n{body}")
-    if args.no_card:
-        return
-    store = _store()
-    device_id = _match(store, args.device)
-    if device_id is None:
-        return
-    try:
-        card = _cards().set(title, body, ttl_s=args.ttl, target=device_id)
-    except ValueError as exc:
-        sys.exit(str(exc))
-    print(f"\nCard queued for {args.device} ({card['ttl_s']:.0f} s on screen).")
+    tiles = _tiles()
+    device, where = None, "every gadget"
+    if getattr(args, "device", None):
+        store = _store()
+        device = _match(store, args.device)
+        if device is None:
+            sys.exit(1)
+        where = store.devices()[device].get("name") or device
+    if args.widget_command == "set":
+        try:
+            widget = tiles.set_widget(
+                args.name, _widget_kind(args), device=device, label=args.label, value=args.value, unit=args.unit,
+                percent=args.percent, items=args.item, title=args.title, text=args.text, state=args.state,
+                ttl_s=args.ttl)
+        except (ValueError, OSError) as exc:
+            sys.exit(str(exc))
+        print(f"Set {args.name} ({widget['kind']}) for {where}: {widget_summary(widget)}. "
+              "Connected gadgets get it within a few seconds.")
+    elif args.widget_command == "clear":
+        if not args.name and not args.all:
+            sys.exit("Give a widget name, or --all.")
+        if tiles.clear_widgets(None if args.all else args.name, device=device):
+            print("Cleared " + (f"every widget set for {where}." if args.all else f"{args.name} for {where}."))
+        else:
+            print(f"No such widget is set for {where}." if args.name else f"No widgets were set for {where}.")
+    else:
+        scopes = tiles.widget_scopes()
+        if not scopes:
+            print("No widgets. Add one: hermes gadget widget set office --value 21.5 --unit C --label Office")
+        names = {d: r.get("name") or d for d, r in _store().devices().items()} if set(scopes) - {ALL_DEVICES} else {}
+        for scope, widgets in scopes.items():
+            target = "all" if scope == ALL_DEVICES else names.get(scope, scope)
+            for w in widgets:
+                print(f"{w['id']:<16} {w['kind']:<9} {target:<14} {w['label']:<16} {widget_summary(w):<20} "
+                      f"{w.get('state', '-')}")
 
 
 def setup_argparse(parser) -> None:
@@ -370,6 +521,20 @@ def setup_argparse(parser) -> None:
                         help="With --latest, install even if the device runs that version, a newer one, or an unknown one")
     update.add_argument("--no-wait", action="store_true", help="Stage it and return; the gateway installs it")
     update.add_argument("--timeout", type=float, default=600, help="Seconds to wait for the install (default 600)")
+    bot = subs.add_parser("bot-chat", help="Put a gadget in a profile's Bot Chat, so that profile can message "
+                                           "the other Bots (Hermes Bot Mode)")
+    bot.add_argument("device", help="Device id or name")
+    bot.add_argument("profile", nargs="?", default="default", help="The profile that leads (default: default)")
+    bot.add_argument("--timeout", type=float, default=60, help="Seconds to wait for the result (default 60)")
+    diag = subs.add_parser("diag", help="Save a connected gadget's diagnostics report, without a USB cable")
+    diag.add_argument("device", help="Device id or name")
+    diag.add_argument("--out", help="Where to save it (default: hermes-gadget-diag-<device>-<time>.txt here)")
+    interp = subs.add_parser("interpret", help="Make a gadget interpret between two languages: it says and shows "
+                                               "each thing said to it in the other one")
+    interp.add_argument("device", help="Device id or name")
+    interp.add_argument("languages", nargs="+", metavar="language",
+                        help="Two languages, the one spoken first first (codes such as es en, or English names); "
+                             "or 'off' to stop")
     tile = subs.add_parser("tile", help="Set the status tiles the gadget dashboard shows")
     tile_subs = tile.add_subparsers(dest="tile_command")
     tile_set = tile_subs.add_parser("set", help="Add a tile or change its value")
@@ -382,24 +547,31 @@ def setup_argparse(parser) -> None:
     tile_clear.add_argument("name", nargs="?", help="The tile to remove")
     tile_clear.add_argument("--all", action="store_true", help="Remove every tile")
     tile_subs.add_parser("list", help="Show the tiles")
-    show = subs.add_parser("show", help="Put a card on a gadget's screen without starting a turn")
-    show.add_argument("device", help="Device id or name")
-    show.add_argument("title", help="The card's title")
-    show.add_argument("body", nargs="?", default="", help="The card's body")
-    show.add_argument("--ttl", type=float, default=20.0, help="Seconds it stays on screen (default 20)")
-    weather = subs.add_parser("weather", help="Show the forecast on a gadget (QWeather)")
-    weather.add_argument("device", nargs="?", help="Device id or name; omit to print only")
-    weather.add_argument("--days", type=int, default=3, help="Forecast days, 1-10 (default 3)")
-    weather.add_argument("--place", default=None,
-                         help="City name (e.g. 南京); omit for the configured place")
-    weather.add_argument("--ttl", type=float, default=300.0, help="Seconds it stays on screen (default 300)")
-    weather.add_argument("--no-card", action="store_true", help="Print the forecast, put nothing on the screen")
+    widget = subs.add_parser("widget", help="Set the full-screen widgets a gadget pages through from its home screen")
+    widget_subs = widget.add_subparsers(dest="widget_command")
+    widget_set = widget_subs.add_parser(
+        "set", help="Add a widget or replace it. One of --value, --percent, --item and --title picks its kind")
+    widget_set.add_argument("name", help="The widget's name, e.g. office")
+    widget_set.add_argument("--value", help="A big value, e.g. 21.5")
+    widget_set.add_argument("--unit", help="With --value: its unit, e.g. C")
+    widget_set.add_argument("--percent", type=float, help="A progress bar, 0 to 100")
+    widget_set.add_argument("--item", action="append", help="A line of a short list; up to four")
+    widget_set.add_argument("--title", help="The first line of a two-line headline")
+    widget_set.add_argument("--text", help="With --title: the second line")
+    widget_set.add_argument("--label", help="The small heading; the name by default")
+    widget_set.add_argument("--state", choices=["ok", "warn", "bad"], help="Colours it green, yellow or red")
+    widget_set.add_argument("--ttl", type=float, help="Seconds until it disappears unless set again")
+    widget_clear = widget_subs.add_parser("clear", help="Remove a widget")
+    widget_clear.add_argument("name", nargs="?", help="The widget to remove")
+    widget_clear.add_argument("--all", action="store_true", help="Remove every widget")
+    for sub in (widget_set, widget_clear):
+        sub.add_argument("--device", help="Only this gadget (id or name); every gadget without it")
+    widget_subs.add_parser("list", help="Show the widgets")
     parser.set_defaults(func=handle)
 
 
 _COMMANDS = {"devices": _cmd_devices, "ls": _cmd_devices, "forget": _cmd_forget, "info": _cmd_info,
-             "pair": _cmd_pair, "update": _cmd_update, "tile": _cmd_tile, "show": _cmd_show,
-             "weather": _cmd_weather}
+             "pair": _cmd_pair, "update": _cmd_update, "diag": _cmd_diag, "tile": _cmd_tile, "widget": _cmd_widget, "interpret": _cmd_interpret, "bot-chat": _cmd_bot_chat}
 
 
 def handle(args) -> None:

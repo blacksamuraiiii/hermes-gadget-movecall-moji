@@ -52,10 +52,9 @@ const std::array<const char*, kMessageCount>& written(Lang lang) {
   return tables[l];
 }
 
-// True when this build's font draws all of `s` as written.
 bool drawable(std::string_view s) {
   for (size_t i = 0; i < s.size();)
-    if (const uint32_t cp = font::decode(s, i); cp != '\n' && !font::drawable(cp)) return false;
+    if (const char32_t cp = font::next(s, i); cp != '\n' && !font::drawable(cp)) return false;
   return true;
 }
 
@@ -177,36 +176,17 @@ std::string fold_ascii(std::string_view s) {
   return out;
 }
 
-// Text in what this build's font can draw: a code point with a glyph is kept as
-// written (Latin-1 accents on the 5x7 table, hanzi on the CJK one), typographic
-// punctuation becomes its ASCII stand-in, and a Latin-1 letter the font lacks
-// degrades to its nearest ASCII letter rather than a '?'. Anything else is '?'.
 std::string fold_to_font(std::string_view s) {
   std::string out;
   out.reserve(s.size());
   for (size_t i = 0; i < s.size();) {
     const size_t at = i;
-    const uint32_t cp = font::decode(s, i);
-    // "°C"/"°F" is a value plus its unit: the CJK font draws the unit glyph ℃,
-    // which keeps the reading (and the column count) intact at these sizes.
-    if (cp == 0xB0 && font::drawable(0x2103)) {
-      size_t peek = i;
-      const uint32_t next = font::decode(s, peek);
-      if (next == 'C' || next == 'c' || next == 'F' || next == 'f') {
-        out += "\xE2\x84\x83";
-        i = peek;
-        continue;
-      }
-    }
-    if (cp != 0 && (cp == '\n' || font::drawable(cp))) {
-      out.append(s.substr(at, i - at));
-      continue;
-    }
-    if (cp == 0x2018 || cp == 0x2019) out += '\'';
+    const char32_t cp = font::next(s, i);
+    if (cp == '\n' || font::drawable(cp)) out.append(s.substr(at, i - at));
+    else if (cp == 0x2018 || cp == 0x2019) out += '\'';
     else if (cp == 0x201C || cp == 0x201D) out += '"';
     else if (cp == 0x2013 || cp == 0x2014) out += '-';
     else if (cp == 0x2026) out += "...";
-    else if (cp >= 0xA0 && cp <= 0xFF) out += kLatin1[cp - 0xA0];
     else out += '?';
   }
   return out;

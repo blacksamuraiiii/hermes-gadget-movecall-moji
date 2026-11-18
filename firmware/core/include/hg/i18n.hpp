@@ -5,7 +5,7 @@
 // message ids to text; a message it leaves out is shown in English. Text with
 // {0}, {1}... is filled in by format(), so a translation can put the pieces in
 // its own order. Translations are written in UTF-8 with their accents; until
-// the font draws them, text() folds them to the nearest ASCII (fold_ascii).
+// text() keeps what the font draws (ASCII and Latin-1) and folds the rest (fold_to_font).
 //
 // Replies, cards and questions come from Hermes in the user's language and are
 // not translated here.
@@ -24,7 +24,7 @@ namespace hg::i18n {
 #define HG_I18N_MESSAGES(X) \
   /* Settings menu */ \
   X(Settings,               "Settings") \
-  X(SettingsHintTouch,      "Tap: change | Swipe: next") \
+  X(SettingsHintTouch,      "Tap: change | Drag: scroll") \
   X(SettingsHintButtons,    "{0}: change | {1}: next") \
   X(SpeakerVolume,          "Speaker volume") \
   X(ChangesSaved,           "Changes are saved.") \
@@ -35,6 +35,11 @@ namespace hg::i18n {
   X(NoMicDriver,            "No microphone driver is active.") \
   X(TalkModeHold,           "Hold to record; release to send.") \
   X(TalkModeTap,            "Tap to record; pause or tap to send.") \
+  X(TouchTalk,              "Touch to talk") \
+  X(TouchTalkOn,            "On\nTouch the screen to talk.") \
+  X(TouchTalkOff,           "Off\nTalk with {0}; touch only navigates.") \
+  X(TalkHold,               "Hold") \
+  X(TalkTap,                "Tap") \
   X(MicCheck,               "Microphone check") \
   X(MicCheckLive,           "Speak now. Level: {0}%\nLocal only. Nothing is sent.") \
   X(MicCheckIntro,          "Start to check the microphone level. No recording is saved or sent.") \
@@ -44,6 +49,12 @@ namespace hg::i18n {
   X(DisplayCheckIntro,      "Start to show red, green, blue, white and black bands.") \
   X(InputCheck,             "Input check") \
   X(InputCheckIntro,        "Start to check the controls. Cancel leaves this check.") \
+  X(Camera,                 "Camera") \
+  X(CameraIntro,            "Open the camera. Tap for a photo after a three-second countdown; tap again to retake. Swipe down to leave.") \
+  X(CameraTake,             "Tap to take a photo") \
+  X(CameraHoldStill,        "Hold still") \
+  X(CameraRetake,           "Tap to retake") \
+  X(CameraFailed,           "The camera didn't take a photo") \
   X(DeviceInfo,             "Device information") \
   X(DeviceInfoBody,         "{0}\nFirmware {1}\n{2}\nMicrophone: {3}\nSpeaker: {4}") \
   X(Available,              "available") \
@@ -70,6 +81,51 @@ namespace hg::i18n {
   X(ScreenTimeout,          "Screen timeout") \
   X(TimeoutSeconds,         "{0} seconds\nDims halfway; first input wakes.") \
   X(TimeoutAlwaysOn,        "Always on\nSelect to enable automatic dimming and screen sleep.") \
+  X(BatteryAlert,           "Low battery alert") \
+  X(BatteryAlertOff,        "Off\nSelect to light the screen when the battery runs low.") \
+  X(BatteryAlertAt,         "At {0}\nOn battery, the screen lights once at each.") \
+  X(BatteryAlertSound,      "Low battery sound") \
+  X(BatteryAlertSoundOn,    "On\nThe low battery alert beeps.") \
+  X(BatteryAlertSoundOff,   "Off\nThe low battery alert is silent.") \
+  X(ChargingNotice,         "Charging screen") \
+  X(ChargingNoticeOn,       "On\nPlugging in USB shows the battery level.") \
+  X(ChargingNoticeOff,      "Off\nPlugging in USB leaves the screen as it is.") \
+  X(ChargingSound,          "Charging sound") \
+  X(ChargingSoundOn,        "On\nPlugging in USB chirps.") \
+  X(ChargingSoundOff,       "Off\nPlugging in USB is silent.") \
+  X(ChargedNotice,          "Full battery screen") \
+  X(ChargedNoticeOn,        "On\nA full battery lights the screen once per charge.") \
+  X(ChargedNoticeOff,       "Off\nA full battery leaves the screen as it is.") \
+  X(ChargedSound,           "Full battery sound") \
+  X(ChargedSoundOn,         "On\nA full battery chimes once per charge.") \
+  X(ChargedSoundOff,        "Off\nA full battery is silent.") \
+  X(BatteryFull,            "Battery full") \
+  X(YouCanUnplug,           "You can unplug") \
+  X(WifiDeepSleep,          "Deep Wi-Fi sleep") \
+  X(WifiDeepSleepOn,        "On\nOn battery with the screen dark, Wi-Fi sleeps deeper.") \
+  X(WifiDeepSleepOff,       "Off\nFor a router that drops the gadget while it sleeps.") \
+  X(TouchWake,              "Touch wakes screen") \
+  X(TouchWakeOn,            "On\nA touch lights the dark screen.") \
+  X(TouchWakeOff,           "Off\nOnly a button lights the dark screen.") \
+  X(DoubleHome,             "Double press home") \
+  X(DoubleHomeOn,           "On\nPress {0} twice for Ready and the default profile.") \
+  X(DoubleHomeOff,          "Off\nTwo quick presses of {0} talk.") \
+  X(WakeTalk,               "Talk from dark screen") \
+  X(WakeTalkOn,             "On\n{0} lights the dark screen and records.") \
+  X(WakeTalkOff,            "Off\n{0} only lights the dark screen.") \
+  X(Animation,             "Animation") \
+  X(AnimationOn,            "On\nThe ring and the Updating screen move.") \
+  X(AnimationOff,           "Off\nThe ring and the Updating screen stand still.") \
+  X(SdLog,                  "SD card logging") \
+  X(SdLogOn,                "On\nThe log is copied to hermes.log on the microSD card.") \
+  X(SdLogOff,               "Off\nNothing is written to the microSD card.") \
+  X(FaceDownSleep,          "Face-down sleep") \
+  X(FaceDownSleepOn,        "On\nFace down, the screen sleeps and Hermes stays quiet.") \
+  X(FaceDownSleepOff,       "Off\nSelect to sleep when the gadget lies face down.") \
+  X(ClockFace,              "Clock face") \
+  X(ClockAfterSeconds,      "{0} seconds\nA dim clock appears after this much rest.") \
+  X(ClockNoTime,            "{0} seconds\nThe clock starts once the gadget knows the time.") \
+  X(ClockOff,               "Off\nSelect to show a clock after a rest.") \
   X(PowerOff,               "Power off") \
   X(PowerOffIntro,          "Shut down the board. Use its PWR key to turn it on again.") \
   X(WifiSetup,              "Wi-Fi setup") \
@@ -81,6 +137,7 @@ namespace hg::i18n {
   X(SelectToPairAnother,    "Select to pair another.") \
   X(Language,               "Language") \
   X(LanguageBody,           "{0}\nSelect for the next language.") \
+  X(LanguageAuto,           "Automatic, as Hermes: {0}") \
   X(BackToHermes,           "Back to Hermes") \
   X(SelectToClose,          "Select to close settings.") \
   X(CheckStopped,           "Check stopped") \
@@ -140,6 +197,8 @@ namespace hg::i18n {
   X(PairThisDevice,         "Pair this device") \
   X(AskingForCode,          "Asking Hermes for a pairing code...") \
   X(WaitingForApproval,     "waiting for approval") \
+  X(RefusedByRoute,         "Refused by a route") \
+  X(RemoveRouteOnHost,      "Remove its route on the Hermes host.") \
   X(PairedWithHermes,       "Paired with Hermes") \
   X(ApprovePairingFirst,    "Approve pairing first") \
   /* Talking */ \
@@ -154,13 +213,17 @@ namespace hg::i18n {
   X(Cancelled,              "Cancelled") \
   X(Sending,                "Sending...") \
   X(CouldntSendRecording,   "Couldn't send the recording") \
+  X(OfflineStillRecording,  "Offline, still recording") \
+  X(ReconnectingToSend,     "Reconnecting to send...") \
   X(NotConnected,           "Not connected to Hermes") \
   X(NewSessionIn,           "New session in {0}s") \
   X(NewSession,             "New session") \
   X(StartingNewSession,     "Starting a new session") \
+  X(Interpreter,            "Interpreter") \
+  X(InterpreterOffIn,       "Interpreter off in {0}s") \
+  X(InterpreterOff,         "Interpreter off") \
   X(Thinking,               "Thinking") \
   X(ButtonToStop,           "{0} to stop") \
-  X(Running,                "Running") \
   X(Speaking,               "Speaking") \
   X(HoldToReply,            "Hold to reply") \
   X(ButtonToReply,          "{0} to reply") \
@@ -175,6 +238,11 @@ namespace hg::i18n {
   X(HermesWaiting,          "Hermes is waiting for you") \
   X(AnsweredYes,            "Answered: yes") \
   X(AnsweredNo,             "Answered: no") \
+  X(AnsweredChoice,         "Answered: {0}") \
+  X(ChoiceTapHint,          "Tap an answer") \
+  X(ChoicePickHint,         "{0}: choose") \
+  X(ChoiceStepHint,         "{0}: next, {1}: choose") \
+  X(ChoiceCancel,           "Cancel") \
   X(Image,                  "Image") \
   /* Ready screen */ \
   X(Ready,                  "Ready") \
@@ -188,6 +256,50 @@ namespace hg::i18n {
   X(SwipeDownForSessions,   "Swipe down for sessions") \
   X(ButtonShowsSessions,    "{0} shows sessions") \
   X(LowBattery,             "Low battery: connect USB") \
+  X(LowBatteryTitle,        "Low battery") \
+  X(ConnectUsbToCharge,     "Connect USB to charge") \
+  /* Timers */ \
+  X(TimerLeft,              "Timer {0}") \
+  X(TimerDone,              "TIMER DONE") \
+  X(TapScreenToStop,        "Tap the screen to stop") \
+  /* The resting clock's date: weekday, month and day, each name at most 3 letters */ \
+  X(ClockDate,              "{0} {1} {2}") \
+  X(WeekdaySun,             "SUN") \
+  X(WeekdayMon,             "MON") \
+  X(WeekdayTue,             "TUE") \
+  X(WeekdayWed,             "WED") \
+  X(WeekdayThu,             "THU") \
+  X(WeekdayFri,             "FRI") \
+  X(WeekdaySat,             "SAT") \
+  X(MonthJan,               "JAN") \
+  X(MonthFeb,               "FEB") \
+  X(MonthMar,               "MAR") \
+  X(MonthApr,               "APR") \
+  X(MonthMay,               "MAY") \
+  X(MonthJun,               "JUN") \
+  X(MonthJul,               "JUL") \
+  X(MonthAug,               "AUG") \
+  X(MonthSep,               "SEP") \
+  X(MonthOct,               "OCT") \
+  X(MonthNov,               "NOV") \
+  X(MonthDec,               "DEC") \
+  /* Hermes profiles */ \
+  X(ProfileSetting,         "Hermes profile") \
+  X(ProfileSettingNext,     "{0}\nSelect to switch to the next profile.") \
+  X(ProfileSettingChoose,   "{0}\nSelect to choose a profile.") \
+  X(ProfileGridSetting,     "Profiles per page") \
+  X(ProfileGridValue,       "{0}\nSelect for another grid. A small screen shows fewer.") \
+  X(ProfileCantSwitch,      "Can't switch now") \
+  X(ProfileGreeting,        "Hi, I'm {0}") \
+  X(ProfileSwipe,           "Swipe to change") \
+  X(ProfileInSettings,      "Change in Settings") \
+  X(ProfileListTitle,       "Talk to") \
+  X(ProfileListHint,        "Swipe down to go back") \
+  X(ProfileSwitching,       "Switching to {0}...") \
+  X(ProfileSwitched,        "Now talking to {0}") \
+  X(ProfileRefusedBusy,     "Finish this turn first") \
+  X(ProfileRefusedUnknown,  "Profile unavailable") \
+  X(ProfileRefused,         "Switch not allowed") \
   /* Dashboard */ \
   X(HermesSessions,         "Hermes sessions") \
   X(NoSessions,             "No sessions") \
@@ -239,7 +351,7 @@ std::optional<Lang> parse(std::string_view code);
 // The language after `lang`, wrapping: the settings menu steps through them.
 Lang next(Lang lang);
 
-// The message in `lang`, folded to what the font draws; English where the
+// The message in `lang`, as the font draws it (fold_to_font); English where the
 // translation leaves it out. Valid for the life of the program.
 const char* text(Lang lang, Msg id);
 // The English text, as listed above.
@@ -251,8 +363,8 @@ std::string format(std::string_view text, std::initializer_list<std::string_view
 // The nearest ASCII for UTF-8 text: accents dropped, ¿ and ¡ left out,
 // typographic punctuation replaced; anything else becomes '?'.
 std::string fold_ascii(std::string_view utf8);
-// UTF-8 text folded to what this build's font draws: glyphs it has are kept as
-// written, typographic punctuation replaced, anything else its nearest ASCII or '?'.
+// UTF-8 text the font can draw: ASCII and Latin-1 kept as they are,
+// typographic punctuation replaced, anything else '?'.
 std::string fold_to_font(std::string_view utf8);
 
 // A board's control name in `lang`: the words above are translated, a button's

@@ -28,6 +28,13 @@ def _make_sim(args):
 def cmd_sim(args) -> int:
     from .sim.native import SimLibraryError
 
+    if args.live_audio:
+        from .sim.audio_io import sounddevice_available
+
+        if not sounddevice_available():
+            print('error: --live-audio needs the audio extra: python -m pip install -e ".[audio]"',
+                  file=sys.stderr)
+            return 2
     try:
         sim = _make_sim(args)
     except SimLibraryError as exc:
@@ -89,6 +96,20 @@ def _script_step(sim, cmd: str, rest: str) -> None:
             sim.set_power(json.loads(rest))
         except (ValueError, TypeError) as exc:
             raise ScriptError(f"invalid power reading: {exc}") from exc
+    elif cmd == "facedown":
+        if rest not in ("on", "off"):
+            raise ScriptError("facedown needs on or off")
+        if not sim.board.motion:
+            raise ScriptError(f"the {sim.board.name} board has no motion sensor")
+        sim.set_face_down(rest == "on")
+    elif cmd == "time":
+        if rest == "now":
+            sim.set_wall_time(None)  # follow the computer's clock again
+        else:
+            try:
+                sim.set_wall_time(time.strptime(rest, "%Y-%m-%dT%H:%M"))
+            except ValueError as exc:
+                raise ScriptError(f"invalid time {rest!r}: use YYYY-MM-DDTHH:MM or 'now'") from exc
     elif cmd == "status":
         print(sim.status())
     elif cmd == "screenshot":
@@ -110,7 +131,7 @@ def cmd_devserver(args) -> int:
     state = Path(args.state_dir) if args.state_dir else paths.default_state_dir() / "devserver"
     try:
         asyncio.run(devserver.serve(args.host, args.port, args.path, state, require_pairing=args.pairing,
-                                    loopback=not args.no_loopback, token=args.token))
+                                    loopback=not args.no_loopback, token=args.token, language=args.language))
     except KeyboardInterrupt:
         pass
     return 0
@@ -129,7 +150,9 @@ def cmd_build_sim(args) -> int:
         configure += ["-G", args.generator]
     if sys.platform != "win32":
         configure += [f"-DCMAKE_BUILD_TYPE={args.config}"]
-    for step in (configure, [cmake, "--build", str(build), "--config", args.config]):
+    if args.cjk:
+        configure += ["-DHG_CJK_FONT=ON"]
+    for step in (configure, [cmake, "--build", str(build), "--config", args.config, "--parallel"]):
         print("+", " ".join(step))
         if subprocess.run(step).returncode != 0:
             return 1
@@ -243,7 +266,9 @@ def cmd_provision(args) -> int:
 
 def _diag_summary(report: dict) -> list[str]:
     """A few lines from a ``diag`` report, for the terminal."""
-    out = [f"firmware {report.get('firmware')} on {report.get('board')} ({report.get('device_id')})"]
+    out = []
+    if "firmware" in report:  # the app's part; a report from the port alone has no firmware line
+        out.append(f"firmware {report.get('firmware')} on {report.get('board')} ({report.get('device_id')})")
     if "reset_reason" in report:
         out.append(f"reset reason: {report['reset_reason']}, up {report.get('uptime_s', '?')} s")
     parts = report.get("parts")
@@ -252,12 +277,36 @@ def _diag_summary(report: dict) -> list[str]:
             f"{k} {'yes' if v is True else 'no' if v is False else v}" for k, v in parts.items()))
     if isinstance(report.get("i2c"), list):
         out.append("I2C: " + (", ".join(report["i2c"]) or "nothing answered"))
+    moment = report.get("time")
+    if isinstance(moment, dict):
+        out.append(f"time: {'valid' if moment.get('valid') else 'not valid'}, "
+                   f"{'synced' if moment.get('synced') else 'not synced'}, "
+                   f"{moment.get('utc') or 'no time kept yet'}")
     wifi = report.get("wifi")
     if isinstance(wifi, dict):
         out.append(f"Wi-Fi: joined {wifi.get('ssid')} ({wifi.get('rssi')} dBm), {wifi.get('ip', 'no address')}"
                    if wifi.get("joined") else "Wi-Fi: not joined")
+    touch = report.get("touch")
+    if isinstance(touch, dict) and "reads" in touch:
+        out.append(f"touch: {touch.get('controller')} read on {touch.get('read_on')}, {touch.get('reads')} reads, "
+                   f"{touch.get('read_errors')} failed ({touch.get('error_streak')} in a row), last good read "
+                   f"{touch.get('last_read_ms_ago')} ms ago, task last ran {touch.get('task_ms_ago')} ms ago, "
+                   f"{touch.get('events_dropped')} events dropped")
+    events = report.get("events")
+    if isinstance(events, dict) and events.get("dropped"):
+        out.append(f"event queue: {events['dropped']} events dropped, peak {events.get('peak')} of {events.get('depth')}")
+    crash = report.get("crash")
+    if isinstance(crash, dict) and crash.get("state") == "saved":
+        build = "this build" if crash.get("this_build") else f"build {crash.get('elf_sha256')}"
+        out.append(f"last crash: task {crash.get('task')} at {crash.get('pc')} ({build}); "
+                   "the full report lists its backtrace")
+    if report.get("app") == "not answering":
+        out.append("Hermes: the app task did not answer; this report comes from the port alone")
+        return out
     app, conn = report.get("app") or {}, report.get("connection") or {}
     line = f"Hermes: {app.get('phase')}, {'paired' if app.get('paired') else 'not paired'}"
+    if app.get("unpaired_reason"):
+        line += f" ({app['unpaired_reason']})"
     if conn.get("last_close"):
         line += f", last connection ended: {conn['last_close']}"
     if app.get("error"):
@@ -405,6 +454,8 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--pairing", action="store_true", help="Require pairing codes (approve from the console)")
     d.add_argument("--no-loopback", action="store_true", help="Do not play recorded voice back")
     d.add_argument("--token", help="Require this access token from devices")
+    d.add_argument("--language", help="Name this language in welcome, as Hermes does (e.g. es); "
+                   "devices whose language is auto follow it")
     d.add_argument("--state-dir")
     d.set_defaults(func=cmd_devserver)
 
@@ -412,6 +463,7 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--config", default="Release")
     b.add_argument("--generator", help="CMake generator override")
     b.add_argument("--test", action="store_true", help="Also run the core unit tests")
+    b.add_argument("--cjk", action="store_true", help="Taller text lines that fit the 12x12 CJK font (docs/cjk.md)")
     b.set_defaults(func=cmd_build_sim)
 
     pl = sub.add_parser("plugin", help="Manage the Hermes plugin")

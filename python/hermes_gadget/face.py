@@ -1,7 +1,7 @@
 """The face the device draws, and how to make one from a picture.
 
-The firmware draws five frames — idle, blink, talk, happy and sad — at 64, 96,
-144 and 192 px. They ship as the Hermes Agent mascot, generated into
+The firmware draws three frames, idle, blink and talk, at 64, 96, 144 and 192 px.
+They ship as the Hermes Agent mascot, generated into
 `firmware/core/src/mascot_data.cpp`.
 
 Two profiles:
@@ -24,10 +24,12 @@ from __future__ import annotations
 
 import os
 import shlex
-from dataclasses import dataclass
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
+
+from hermes_gadget_plugin.face import (  # shared with the plugin, which sends faces to devices
+    FRAMES, MASTER_SIZE, SIZES, THRESHOLD, Options, ink_box, measure, pack, thousandths, to_bits)
 
 from .paths import repo_root
 
@@ -35,20 +37,10 @@ REPO = repo_root()
 MASTER = REPO / "assets" / "mascot" / "nous-girl-white-1024.png"
 OUT_DEFAULT = REPO / "firmware" / "core" / "src" / "mascot_data.cpp"
 
-SIZES = (64, 96, 144, 192)
-FRAMES = ("idle", "blink", "talk", "happy", "sad")
-THRESHOLD = 110  # alpha above this is ink after downsampling
-MASTER_SIZE = 1024  # the master's side, in pixels: the coordinates below live in this space
 BG = (10, 14, 20)  # the device's background, for the pictures we write
 LID_DROP = 0.10    # where a closed lid sits inside the eye
 LID_WIDTH = 0.20   # lid stroke, as a fraction of the eye's half width
 LID_SAG = 0.35     # how far the lid dips in the middle
-SMILE_LIFT = 0.45  # how far a happy eyelid rises, as a fraction of the eye's half height
-SMILE_MOUTH_GROW = 1.6  # the open mouth, scaled about its own centre
-FROWN_WIDTH = 1.4  # the sad mouth, as a multiple of the recorded mouth's half width
-FROWN_SAG = 0.85   # how far it bows down at the corners, of that same half width
-TEAR_W, TEAR_H = 32, 48  # the teardrop, in master pixels; at 192 px it is 6 x 9
-TEAR_DROP = 44     # master px below the near eye's centre
 
 # The mascot's feature geometry, in master pixels. The eye and lid shapes are
 # polygons because the artwork's eyes are, which is what makes this reproduce
@@ -107,66 +99,7 @@ def load_master(path: Path, size: int = MASTER_SIZE, mask: str = "alpha",
     return canvas
 
 
-def ink_box(alpha, threshold: int = THRESHOLD) -> tuple[int, int, int, int]:
-    """Where the drawing is, so fractions can be taken of it."""
-    box = alpha.point(lambda v: 255 if v > threshold else 0).getbbox()
-    return box or (0, 0, alpha.width, alpha.height)
-
-
-def thousandths(master_px: int) -> int:
-    """Master pixels to the thousandths of the drawn size the firmware expects.
-
-    The renderer multiplies by the drawn size and divides by 1000, so a master
-    coordinate has to be scaled: at 192 px, skipping this puts every effect
-    about 3 px out.
-    """
-    return round(master_px * 1000 / MASTER_SIZE)
-
-
 # -- the mascot profile ---------------------------------------------------------------------------------
-
-def _bbox(points):
-    xs = [p[0] for p in points]
-    ys = [p[1] for p in points]
-    return min(xs), min(ys), max(xs), max(ys)
-
-
-def _smile(master_alpha):
-    """Happy: the open eyes become upward arcs, and the mouth opens wide.
-
-    The artwork is a solid silhouette, so every feature is cut out of it: the eye
-    is covered with skin (ink) and the new shape drawn as a hole, which is how
-    blink draws its lids too.
-    """
-    happy = master_alpha.copy()
-    draw = ImageDraw.Draw(happy)
-    for eye, width in (("right_eye", 14), ("left_eye", 12)):
-        x0, y0, x1, y1 = _bbox(MASCOT[eye])
-        draw.polygon(MASCOT[eye], fill=255)  # skin over the open eye
-        cy = (y0 + y1) / 2
-        lift = (y1 - y0) / 2 * SMILE_LIFT
-        draw.line([(x0, cy), ((x0 + x1) / 2, cy - lift), (x1, cy)], fill=0, width=width, joint="curve")
-    draw.ellipse(_grow(MASCOT["mouth_open"], SMILE_MOUTH_GROW), fill=0)  # the mouth opens wide
-    return happy
-
-
-def _frown(master_alpha):
-    """Sad: the mouth turns down and one tear leaves the near eye."""
-    sad = master_alpha.copy()
-    draw = ImageDraw.Draw(sad)
-    mx0, my0, mx1, my1 = MASCOT["mouth_open"]
-    draw.ellipse(_grow(MASCOT["mouth_open"], 1.8), fill=255)  # skin over the closed mouth
-    cx, cy = (mx0 + mx1) / 2, (my0 + my1) / 2
-    half = (mx1 - mx0) / 2 * FROWN_WIDTH
-    sag = half * FROWN_SAG
-    draw.line([(cx - half, cy + sag), (cx, cy), (cx + half, cy + sag)], fill=0, width=9, joint="curve")
-    ex0, ey0, ex1, ey1 = _bbox(MASCOT["left_eye"])
-    ex, ey = (ex0 + ex1) / 2, (ey0 + ey1) / 2 + TEAR_DROP
-    draw.ellipse((ex - TEAR_W / 2, ey, ex + TEAR_W / 2, ey + TEAR_H), fill=0)  # the drop
-    draw.polygon([(ex - TEAR_W / 2, ey + TEAR_W / 2), (ex, ey - TEAR_H * 0.45),
-                  (ex + TEAR_W / 2, ey + TEAR_W / 2)], fill=0)  # ...and its point
-    return sad
-
 
 def mascot_frames(master):
     """The frames that ship, drawn the way the artwork's own features are."""
@@ -181,7 +114,7 @@ def mascot_frames(master):
 
     talk = alpha.copy()
     ImageDraw.Draw(talk).ellipse(MASCOT["mouth_open"], fill=0)  # open mouth, cut out of the ink
-    return {"idle": alpha, "blink": blink, "talk": talk, "happy": _smile(alpha), "sad": _frown(alpha)}
+    return {"idle": alpha, "blink": blink, "talk": talk}
 
 
 def mascot_anchors() -> dict:
@@ -192,50 +125,6 @@ def mascot_anchors() -> dict:
 
 # -- a picture of your own ------------------------------------------------------------------------------
 
-@dataclass
-class Options:
-    """How to read a drawing and where its features are, as fractions of its outline."""
-
-    mask: str = "alpha"
-    threshold: int = THRESHOLD
-    crop: tuple[int, int, int, int] | None = None
-    plain: bool = False
-    blink: str = "light"
-    face_x: float = 0.50
-    eye_line: float = 0.40
-    eye_span: float = 0.22
-    eye_size: float = 0.05
-    eye_ratio: float = 0.60
-    eye_left: tuple[float, float, float, float] | None = None
-    eye_right: tuple[float, float, float, float] | None = None
-    eye_grow: float = 1.0
-    mouth_grow: float = 1.0
-    mouth_x: float | None = None
-    mouth_y: float = 0.62
-    mouth_w: float = 0.10
-    mouth_h: float = 0.045
-    ear_cup: tuple[float, float] = (0.62, 0.30)
-    think_dot: tuple[float, float] = (0.82, 0.11)
-
-
-def _eye_box(spec, box) -> tuple[int, int, int, int]:
-    """A feature box from fractions of the outline: centre x, centre y, width, height."""
-    x0, y0, x1, y1 = box
-    w, h = x1 - x0, y1 - y0
-    cx, cy = x0 + w * spec[0], y0 + h * spec[1]
-    rx, ry = w * spec[2] / 2, h * spec[3] / 2
-    return (round(cx - rx), round(cy - ry), round(cx + rx), round(cy + ry))
-
-
-def _grow(box, factor: float):
-    """Scale a box about its own centre."""
-    if factor == 1.0:
-        return box
-    cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
-    rx, ry = (box[2] - box[0]) / 2 * factor, (box[3] - box[1]) / 2 * factor
-    return (round(cx - rx), round(cy - ry), round(cx + rx), round(cy + ry))
-
-
 def lid_cy(box) -> float:
     """Where a closed lid sits: just below the middle of that eye."""
     ry = (box[3] - box[1]) / 2
@@ -244,46 +133,6 @@ def lid_cy(box) -> float:
 
 def lid_width(box) -> int:
     return max(2, round((box[2] - box[0]) / 2 * LID_WIDTH))
-
-
-def measure(alpha, opts: Options) -> dict:
-    """Where the features are, in master pixels, from fractions of the outline."""
-    x0, y0, x1, y1 = ink_box(alpha, opts.threshold)
-    w, h = x1 - x0, y1 - y0
-    cx = x0 + w * opts.face_x
-    eye_y = y0 + h * opts.eye_line
-    eye_dx = w * opts.eye_span / 2
-    eye_r = w * opts.eye_size
-    eye_ry = eye_r * opts.eye_ratio
-
-    if opts.eye_left or opts.eye_right:
-        if not (opts.eye_left and opts.eye_right):
-            raise SystemExit("give both --eye-left and --eye-right, or neither")
-        left = _eye_box(tuple(opts.eye_left), (x0, y0, x1, y1))
-        right = _eye_box(tuple(opts.eye_right), (x0, y0, x1, y1))
-    else:
-        left = (round(cx - eye_dx - eye_r), round(eye_y - eye_ry),
-                round(cx - eye_dx + eye_r), round(eye_y + eye_ry))
-        right = (round(cx + eye_dx - eye_r), round(eye_y - eye_ry),
-                 round(cx + eye_dx + eye_r), round(eye_y + eye_ry))
-    left, right = _grow(left, opts.eye_grow), _grow(right, opts.eye_grow)
-
-    mouth_x = opts.face_x if opts.mouth_x is None else opts.mouth_x
-    mouth_cx, mouth_cy = x0 + w * mouth_x, y0 + h * opts.mouth_y
-    mouth = _grow((round(mouth_cx - w * opts.mouth_w / 2), round(mouth_cy - h * opts.mouth_h / 2),
-                   round(mouth_cx + w * opts.mouth_w / 2), round(mouth_cy + h * opts.mouth_h / 2)),
-                  opts.mouth_grow)
-    return {
-        "left": left,
-        "right": right,
-        "mouth": mouth,
-        "ear_cup": (x0 + w * opts.ear_cup[0], y0 + h * opts.ear_cup[1]),
-        "mouth_pt": (mouth_cx, mouth_cy),
-        "think_dot": (x0 + w * opts.think_dot[0], y0 + h * opts.think_dot[1]),
-        "eyes_rows": (min(left[1], right[1]), max(left[3], right[3])),
-        "mouth_rows": (round(mouth_cy - h * opts.mouth_h / 2 * 2.2),
-                       round(mouth_cy + h * opts.mouth_h / 2 * 2.2)),
-    }
 
 
 def generic_frames(alpha, geo: dict, blink_dark: bool = False):
@@ -315,29 +164,6 @@ def generic_frames(alpha, geo: dict, blink_dark: bool = False):
 
 # -- the file itself ------------------------------------------------------------------------------------
 
-def to_bits(alpha, size: int, threshold: int = THRESHOLD) -> bytes:
-    """One frame at one size: row major, MSB first, rows padded, a set bit is ink."""
-    small = alpha.resize((size, size), Image.LANCZOS).point(lambda v: 255 if v > threshold else 0)
-    px = small.load()
-    out = bytearray()
-    for y in range(size):
-        byte, bits = 0, 0
-        for x in range(size):
-            byte = (byte << 1) | (1 if px[x, y] else 0)
-            bits += 1
-            if bits == 8:
-                out.append(byte)
-                byte, bits = 0, 0
-        if bits:
-            out.append(byte << (8 - bits))
-    return bytes(out)
-
-
-def _frame_order(frames) -> tuple:
-    """FRAMES order, keeping only what this profile drew: a picture of your own has three."""
-    return tuple(f for f in FRAMES if f in frames)
-
-
 def emit(frames, anchors: dict, source: str, threshold: int = THRESHOLD) -> str:
     """The C++ source for a face. `source` is how the header describes where it came from."""
     lines = [
@@ -353,7 +179,7 @@ def emit(frames, anchors: dict, source: str, threshold: int = THRESHOLD) -> str:
     ]
     table = []
     for size in SIZES:
-        for frame in _frame_order(frames):
+        for frame in FRAMES:
             name = f"k{frame.capitalize()}{size}"
             data = to_bits(frames[frame], size, threshold)
             lines.append(f"const uint8_t {name}[{len(data)}] = {{")
@@ -414,7 +240,7 @@ def preview(frames, path: Path, threshold: int = THRESHOLD) -> None:
     pad, scale, label_w, head_h = 10, 3, 86, 54
     cols = [s * scale for s in SIZES]
     sheet = Image.new("RGB", (label_w + sum(c + pad for c in cols) + pad,
-                              head_h + len(_frame_order(frames)) * (max(SIZES) * scale + pad) + pad), BG)
+                              head_h + len(FRAMES) * (max(SIZES) * scale + pad) + pad), BG)
     draw = ImageDraw.Draw(sheet)
     _label(draw, (label_w, 8), "What the screen shows: each row is a pose, each column a size",
            fill=(240, 244, 248), size=22)
@@ -423,7 +249,7 @@ def preview(frames, path: Path, threshold: int = THRESHOLD) -> None:
         _label(draw, (x + width // 2, 32), f"{size} px", size=18, anchor="ma")
         x += width + pad
     y = head_h
-    for frame in _frame_order(frames):
+    for frame in FRAMES:
         row_h = max(SIZES) * scale
         _label(draw, (pad, y + row_h // 2 - 12), frame, size=22)
         x = label_w + pad
@@ -490,9 +316,7 @@ def report(frames, threshold: int = THRESHOLD) -> None:
     for size in SIZES:
         idle = to_bits(frames["idle"], size, threshold)
         parts = []
-        for frame in _frame_order(frames):
-            if frame == "idle":
-                continue
+        for frame in ("blink", "talk"):
             other = to_bits(frames[frame], size, threshold)
             bits = sum(bin(a ^ b).count("1") for a, b in zip(idle, other))
             parts.append(f"{frame} {bits:>5} ({bits * 100 / (size * size):.2f}%)")
@@ -725,6 +549,16 @@ def pick_features(path: Path, opts: Options, side: int = 620) -> str:
     return picker.flags() or ""
 
 
+def write(out: Path, frames, anchors: dict, source: str, threshold: int = THRESHOLD) -> None:
+    """The C++ for the firmware or, for a `.bin` name, a face file for a Hermes profile (docs/faces.md)."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if out.suffix == ".bin":
+        out.write_bytes(pack(frames, anchors, threshold))
+    else:
+        # Forward slashes and LF on every OS, so the file comes out the same everywhere.
+        out.write_text(emit(frames, anchors, source, threshold), encoding="utf-8", newline="\n")
+
+
 # -- the two things the CLI calls -----------------------------------------------------------------------
 
 def write_mascot(out: Path = OUT_DEFAULT, preview_path: Path | None = None,
@@ -738,9 +572,7 @@ def write_mascot(out: Path = OUT_DEFAULT, preview_path: Path | None = None,
     box = ink_box(alpha)
     source = MASTER.relative_to(REPO).as_posix() if REPO in MASTER.parents else MASTER.name
 
-    out.parent.mkdir(parents=True, exist_ok=True)
-    # Forward slashes and LF on every OS, so the file comes out the same everywhere.
-    out.write_text(emit(frames, mascot_anchors(), source), encoding="utf-8", newline="\n")
+    write(out, frames, mascot_anchors(), source)
     print(f"wrote {out}")
     preview_path = preview_path or REPO / "build" / "mascot-preview.png"
     preview(frames, preview_path)
@@ -778,8 +610,7 @@ def write_face(source: Path, opts: Options, out: Path = OUT_DEFAULT,
     print(f"ear cup:   {tuple(round(v) for v in geo['ear_cup'])}   "
           f"think dot: {tuple(round(v) for v in geo['think_dot'])}")
 
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(emit(frames, geo, label, opts.threshold), encoding="utf-8", newline="\n")
+    write(out, frames, geo, label, opts.threshold)
     print(f"wrote {out}")
     preview_path = preview_path or REPO / "build" / "face-preview.png"
     preview(frames, preview_path, opts.threshold)

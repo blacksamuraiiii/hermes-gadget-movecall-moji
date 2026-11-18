@@ -23,17 +23,19 @@ TESTED_HERMES_COMMIT = "2eceb0275501b09febdec88d08b80d1fff730cf8"
 
 # Module -> names the plugin imports from it.
 IMPORTS: dict[str, tuple[str, ...]] = {
-    "agent.i18n": ("t",),
+    "agent.i18n": ("get_language", "t"),
     "gateway.config": ("Platform", "PlatformConfig", "HomeChannel", "persist_home_channel"),
     "gateway.pairing": ("PairingStore",),
     "gateway.platforms._shared": ("extra_or_secret", "get_scoped_secret"),
     "gateway.platforms.base": ("AudioFormat", "BasePlatformAdapter", "ExecApprovalPrompt", "SendResult",
-                               "StreamingTTSHandle", "cache_audio_from_bytes_async", "cache_image_from_url"),
+                               "StreamingTTSHandle", "cache_audio_from_bytes_async", "cache_image_from_url",
+                               "get_audio_cache_dir"),
     "gateway.platforms.event": ("MessageEvent", "MessageType"),
     "gateway.session_context": ("get_session_env",),
     "plugins.plugin_storage": ("plugin_data_dir",),
     "tools.slash_confirm": ("get_pending", "resolve"),
     "tools.approval": ("resolve_gateway_approval",),
+    "tools.url_safety": ("create_ssrf_safe_client", "is_safe_url", "redirect_target_from_response"),
     "hermes_cli.config": ("load_config", "set_config_value"),
     "hermes_cli.setup": ("print_header", "print_info", "print_success", "print_warning", "prompt"),
 }
@@ -81,3 +83,18 @@ def check(resolve: Callable[[str], object] = importlib.import_module) -> None:
             "This Hermes Agent lacks what the Hermes Gadget plugin relies on: " + ", ".join(gaps)
             + f". The plugin was tested against Hermes commit {TESTED_HERMES_COMMIT[:12]}; "
             "update the plugin (hermes plugins install) or run that Hermes.")
+
+
+# Hermes's limit for a command approval (approvals.timeout, 300 s by default). It is optional: a
+# Hermes without the function, or the standalone development server, gets the default.
+APPROVAL_TIMEOUT_DEFAULT_S = 300
+
+
+def approval_timeout_s() -> int:
+    """How long Hermes waits for an answer to a command approval, in seconds."""
+    try:
+        from gateway.platforms.base_exec_approval import approval_timeout_seconds
+
+        return int(approval_timeout_seconds())
+    except Exception:
+        return APPROVAL_TIMEOUT_DEFAULT_S

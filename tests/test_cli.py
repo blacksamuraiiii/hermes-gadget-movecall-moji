@@ -171,6 +171,26 @@ def test_script_power_readings_use_native_status(devserver, tmp_path, capsys):
     assert captured.err == ""
 
 
+def test_the_faces_example_script_shows_each_expression(devserver, tmp_path, capsys, monkeypatch):
+    from pathlib import Path
+
+    from hermes_gadget.sim import Simulator
+
+    _, _, url = devserver()
+    sim = Simulator(url=url, state_dir=tmp_path / "device")
+    script = Path(__file__).resolve().parents[1] / "examples" / "scripts" / "faces.txt"
+    monkeypatch.chdir(tmp_path)  # the script saves its screenshots where it runs
+
+    assert cli.run_script(sim, script) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    replies = [line for line in captured.out.splitlines() if line.startswith("@")]
+    assert replies == ["@ok face happy", "@ok face confused", "@ok face alert", "@ok face sleepy",
+                       '@face {"expression":"sleepy"}', '@face {"expression":"neutral"}']
+    shots = {(tmp_path / f"face-{name}.png").read_bytes() for name in ("happy", "confused", "alert", "sleepy")}
+    assert len(shots) == 4
+
+
 @pytest.mark.parametrize("reading", [
     '{"battery_mv":',
     '[]',
@@ -218,3 +238,42 @@ def test_script_invalid_power_preserves_native_reading(
     assert "Traceback" not in captured.err
     assert sim.power_status == previous
     assert snapshot["power"] == {"available": True, **previous}
+
+
+def test_live_audio_without_the_extra_stops_instead_of_running_silent(monkeypatch, capsys):
+    """--live-audio used to fall back to silence, so a recording captured nothing."""
+    monkeypatch.setattr("hermes_gadget.sim.audio_io.sounddevice_available", lambda: False)
+    args = argparse.Namespace(live_audio=True, headless=True, script=None, url="", board="sim-240x240",
+                              name="Test Gadget", token="", state_dir=None)
+
+    assert cli.cmd_sim(args) == 2
+    assert "audio extra" in capsys.readouterr().err
+
+
+def test_diag_summary_names_why_the_device_is_not_paired():
+    report = dict(REPORT, app=dict(REPORT["app"], phase="online", unpaired_reason="routed"))
+    assert "Hermes: online, not paired (routed), last connection ended: connection error" in cli._diag_summary(report)
+
+
+def test_diag_summary_shows_a_stalled_touch_a_full_queue_and_the_last_crash():
+    report = dict(REPORT,
+                  touch={"controller": "cst816", "read_on": "poll", "reads": 900, "read_errors": 40,
+                         "error_streak": 40, "last_read_ms_ago": 8200, "events": 310, "events_dropped": 3,
+                         "task_ms_ago": 12},
+                  events={"waiting": 96, "peak": 96, "depth": 96, "dropped": 17},
+                  crash={"state": "saved", "task": "hg.touch", "pc": "0x42001234", "elf_sha256": "0123456789abcdef",
+                         "this_build": False, "backtrace": ["0x42001234"]})
+    summary = cli._diag_summary(report)
+    assert ("touch: cst816 read on poll, 900 reads, 40 failed (40 in a row), last good read 8200 ms ago, "
+            "task last ran 12 ms ago, 3 events dropped") in summary
+    assert "event queue: 17 events dropped, peak 96 of 96" in summary
+    assert ("last crash: task hg.touch at 0x42001234 (build 0123456789abcdef); "
+            "the full report lists its backtrace") in summary
+
+
+def test_diag_summary_says_when_the_app_task_did_not_answer():
+    report = {"app": "not answering", "reset_reason": "software restart", "uptime_s": 40,
+              "crash": {"state": "none"}, "touch": {"task_ms_ago": 5}}
+    summary = cli._diag_summary(report)
+    assert summary[-1] == "Hermes: the app task did not answer; this report comes from the port alone"
+    assert not any(line.startswith("touch:") or line.startswith("last crash") for line in summary)

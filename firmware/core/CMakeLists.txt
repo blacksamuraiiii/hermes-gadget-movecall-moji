@@ -1,104 +1,67 @@
 # Portable device core. Builds as an ESP-IDF component or a plain CMake library.
-option(HG_CORE_FONT_CJK "Carry the CJK font tables (otherwise the upstream 5x7 Latin-1 one)" ON)
-option(HG_MASCOT "Link the mascot bitmaps (upstream boards' hero face)" ON)
-set(HG_CORE_FONT_CELL "12" CACHE STRING "CJK cell height in pixels (12 baseline, 16 for the moji board)")
-
 set(HG_CORE_SOURCES
     src/app.cpp
     src/app_settings.cpp
+    src/app_camera.cpp
     src/app_power.cpp
     src/app_perf.cpp
     src/app_phone.cpp
+    src/app_timer.cpp
+    src/app_face.cpp
     src/canvas.cpp
     src/crypto.cpp
+    src/font5x7.cpp
+    src/font_cjk.cpp
+    src/font_cjk_data.cpp
     src/i18n.cpp
     src/i18n_es.cpp
     src/frame_stats.cpp
     src/json.cpp
+    src/mascot.cpp
+    src/mascot_data.cpp
     src/protocol.cpp
     src/qr.cpp
-    src/robot_face.cpp
-    src/emoji_face.cpp
     src/setup.cpp
+    src/tones.cpp
     src/touch.cpp
     src/ui.cpp
     src/vad.cpp
-    src/wake.cpp
     src/wifi_networks.cpp
     # Vendored QR encoder (MIT, Richard Moore / Project Nayuki). Adapted for this
     # project; see NOTICE. Committed as .cpp because the project is CXX-only.
     third_party/qrcode/qrcode.cpp
 )
 
-# A build carries exactly one font, and it decides both the metrics and whether the
-# device reports charset=utf-8. The board's Kconfig picks it on ESP targets; a host
-# build uses the option above (the tests exercise the CJK table by default).
-if(ESP_PLATFORM)
-  set(HG_FONT_CJK_BUILD ${CONFIG_HG_FONT_CJK})
-else()
-  set(HG_FONT_CJK_BUILD ${HG_CORE_FONT_CJK})
-endif()
-
-# Which CJK cell height this build carries: 12 px is the tree's baseline, 16 px is the
-# moji board's (single Noto Sans SC table for CJK + Latin, see
-# tools/make_cjk_font.py). The tables live in src/font_*<suffix>.cpp.
-if(ESP_PLATFORM)
-  set(HG_FONT_CELL ${CONFIG_HG_FONT_CELL})
-else()
-  set(HG_FONT_CELL ${HG_CORE_FONT_CELL})
-endif()
-if(NOT HG_FONT_CELL)
-  set(HG_FONT_CELL 12)
-endif()
-
-if(HG_FONT_CJK_BUILD)
-  if(HG_FONT_CELL EQUAL 16)
-    list(APPEND HG_CORE_SOURCES src/font_ascii_16.cpp src/font_cjk_16.cpp)
-  else()
-    list(APPEND HG_CORE_SOURCES src/font_ascii.cpp src/font_cjk.cpp)
-  endif()
-  set(HG_FONT_CJK 1)
-else()
-  list(APPEND HG_CORE_SOURCES src/font_5x7.cpp)
-  set(HG_FONT_CJK 0)
-endif()
-
-# The mascot bitmaps are the upstream boards' hero face. A board that draws its
-# own face (movecall-moji, robot_face) leaves them out: the stub keeps
-# hg::mascot::pick()/anchors() linkable, and pick() returns an empty frame, so
-# nothing is drawn. The board's Kconfig picks it on ESP targets; a host build
-# uses the option above. Host tests assume the mascot is linked; build them
-# with the default ON.
-if(ESP_PLATFORM)
-  set(HG_MASCOT_BUILD ${CONFIG_HG_MASCOT})
-else()
-  set(HG_MASCOT_BUILD ${HG_MASCOT})
-endif()
-if(HG_MASCOT_BUILD)
-  list(APPEND HG_CORE_SOURCES src/mascot_data.cpp)
-else()
-  list(APPEND HG_CORE_SOURCES src/mascot_stub.cpp)
-endif()
+# The 12x12 CJK font and the taller text lines it needs (docs/cjk.md). Everything that
+# includes hg/font.hpp must see the same value, so it travels with the core as a PUBLIC definition.
+option(HG_CJK_FONT "Build in the 12x12 CJK font and its taller text lines" OFF)
 
 if(ESP_PLATFORM)
   idf_component_register(SRCS ${HG_CORE_SOURCES} INCLUDE_DIRS include third_party/qrcode)
-  target_compile_definitions(${COMPONENT_LIB} PUBLIC HG_FONT_CJK=${HG_FONT_CJK} HG_FONT_PX=${HG_FONT_CELL})
-  # Kconfig: Wake word bring-up diagnostics. Core is portable and sees no Kconfig on a host
-  # build, so the option reaches it as a define; a release build leaves it unset.
-  if(CONFIG_HG_WAKE_DIAG)
-    target_compile_definitions(${COMPONENT_LIB} PUBLIC HG_WAKE_DIAG=1)
+  if(HG_CJK_FONT)
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC HG_CJK_FONT=1)
   endif()
   return()
 endif()
 
-add_library(hg_core STATIC ${HG_CORE_SOURCES})
-target_include_directories(hg_core PUBLIC include)
-target_compile_definitions(hg_core PUBLIC HG_FONT_CJK=${HG_FONT_CJK} HG_FONT_PX=${HG_FONT_CELL})
-target_include_directories(hg_core PRIVATE third_party/qrcode)
-target_compile_features(hg_core PUBLIC cxx_std_17)
-set_target_properties(hg_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
-if(MSVC)
-  target_compile_options(hg_core PRIVATE /W4 /utf-8)
-else()
-  target_compile_options(hg_core PRIVATE -Wall -Wextra -fno-exceptions -fno-rtti)
-endif()
+# hg_core follows HG_CJK_FONT. The host tests also build hg_core_cjk, with the font always in,
+# so the CJK code is tested on every build (firmware/CMakeLists.txt).
+list(TRANSFORM HG_CORE_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
+set(HG_CORE_SOURCES "${HG_CORE_SOURCES}" CACHE INTERNAL "")
+set(HG_CORE_DIR "${CMAKE_CURRENT_SOURCE_DIR}" CACHE INTERNAL "")
+function(hg_core_library name cjk)
+  add_library(${name} STATIC ${HG_CORE_SOURCES})
+  target_include_directories(${name} PUBLIC ${HG_CORE_DIR}/include)
+  if(cjk)
+    target_compile_definitions(${name} PUBLIC HG_CJK_FONT=1)
+  endif()
+  target_include_directories(${name} PRIVATE ${HG_CORE_DIR}/third_party/qrcode)
+  target_compile_features(${name} PUBLIC cxx_std_17)
+  set_target_properties(${name} PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  if(MSVC)
+    target_compile_options(${name} PRIVATE /W4 /utf-8)
+  else()
+    target_compile_options(${name} PRIVATE -Wall -Wextra -fno-exceptions -fno-rtti)
+  endif()
+endfunction()
+hg_core_library(hg_core ${HG_CJK_FONT})

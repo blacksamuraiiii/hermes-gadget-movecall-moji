@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "check.hpp"
+#include "hg/canvas.hpp"
 #include "hg/font.hpp"
 #include "hg/i18n.hpp"
 #include "hg/ui.hpp"
@@ -87,12 +88,12 @@ TEST("i18n: each translation is complete and keeps the English placeholders") {
   }
 }
 
-TEST("i18n: drawn text is in the font: ASCII and, where the build has them, Latin-1") {
+TEST("i18n: drawn text is in the font: ASCII and Latin-1, as written") {
   for (size_t l = 0; l < hg::i18n::kLangCount; ++l) {
     for (Msg m : all_messages()) {
       const std::string_view t = hg::i18n::text(static_cast<Lang>(l), m);
       for (size_t i = 0; i < t.size();) {
-        const uint32_t cp = hg::font::decode(t, i);
+        const char32_t cp = hg::font::next(t, i);
         if (cp != '\n' && !hg::font::drawable(cp)) {
           check::fail(__FILE__, __LINE__, std::string("not in the font: \"") + std::string(t) + "\"");
           break;
@@ -100,13 +101,43 @@ TEST("i18n: drawn text is in the font: ASCII and, where the build has them, Lati
       }
     }
   }
-  // Written with its accents; drawn with them when the font carries the glyph, folded otherwise.
-  CHECK_EQ(std::string(hg::i18n::translation(Lang::Es, Msg::DeviceInfo)), std::string("Información"));
-#if HG_FONT_CJK
-  CHECK_EQ(std::string(hg::i18n::text(Lang::Es, Msg::DeviceInfo)), std::string("Informacion"));
-#else
+  // Written with its accents and drawn with them.
   CHECK_EQ(std::string(hg::i18n::text(Lang::Es, Msg::DeviceInfo)), std::string("Información"));
+  CHECK_EQ(std::string(hg::i18n::text(Lang::Es, Msg::ToneFinished)), std::string("Tono terminado. ¿Lo oíste?"));
+}
+
+TEST("i18n: weekday and month names are at most 3 columns in every language") {
+  // The clock face budgets three columns per name (Msg::ClockDate).
+  const Msg names[] = {
+      Msg::WeekdaySun, Msg::WeekdayMon, Msg::WeekdayTue, Msg::WeekdayWed,
+      Msg::WeekdayThu, Msg::WeekdayFri, Msg::WeekdaySat,
+      Msg::MonthJan,   Msg::MonthFeb,   Msg::MonthMar,   Msg::MonthApr,
+      Msg::MonthMay,   Msg::MonthJun,   Msg::MonthJul,   Msg::MonthAug,
+      Msg::MonthSep,   Msg::MonthOct,   Msg::MonthNov,   Msg::MonthDec,
+  };
+  for (size_t l = 0; l < hg::i18n::kLangCount; ++l) {
+    const auto lang = static_cast<Lang>(l);
+    for (Msg m : names) {
+      const std::string_view t = hg::i18n::text(lang, m);
+      if (hg::font::length(t) > 3)
+        check::fail(__FILE__, __LINE__,
+                    std::string(hg::i18n::info(lang).code) + " \"" + std::string(t) + "\" is longer than 3 columns");
+    }
+  }
+}
+
+TEST("i18n: folding to the font keeps Latin-1 and replaces the rest") {
+  using hg::i18n::fold_to_font;
+  CHECK_EQ(fold_to_font("¿Cómo estás? ¡Sí! Ñandú"), std::string("¿Cómo estás? ¡Sí! Ñandú"));
+  CHECK_EQ(fold_to_font("“quoted” – it’s…"), std::string("\"quoted\" - it's..."));
+#if HG_CJK_FONT
+  // The CJK font has these two; the emoji it does not, and it stays one column.
+  CHECK_EQ(fold_to_font("日本 🙂"), std::string("日本 ?"));
+#else
+  CHECK_EQ(fold_to_font("日本 🙂"), std::string("?? ?"));
 #endif
+  CHECK_EQ(fold_to_font("a\xC3"), std::string("a?"));
+  CHECK_EQ(fold_to_font("line\nbreak"), std::string("line\nbreak"));
 }
 
 TEST("i18n: folding keeps ASCII and finds the nearest letter for the rest") {
@@ -122,46 +153,6 @@ TEST("i18n: folding keeps ASCII and finds the nearest letter for the rest") {
   CHECK_EQ(fold_ascii("line\nbreak"), std::string("line\nbreak"));
 }
 
-TEST("i18n: folding to the font keeps what it draws and stands in for the rest") {
-  using hg::i18n::fold_to_font;
-  // Typographic punctuation always gets its ASCII stand-in.
-  CHECK_EQ(fold_to_font("“quoted” – it’s…"), std::string("\"quoted\" - it's..."));
-  CHECK_EQ(fold_to_font("Ready"), std::string("Ready"));
-  CHECK_EQ(fold_to_font("line\nbreak"), std::string("line\nbreak"));
-  CHECK_EQ(fold_to_font("a\xC3"), std::string("a?"));  // a sequence cut short reads as one '?'
-#if HG_FONT_CJK
-  // This build carries ASCII and GB2312 hanzi: hanzi are kept, accents degrade to their base letter.
-  CHECK_EQ(fold_to_font("\xE6\x97\xA5\xE6\x9C\xAC"), std::string("\xE6\x97\xA5\xE6\x9C\xAC"));
-  CHECK_EQ(fold_to_font("¿Cómo estás?"), std::string("Como estas?"));
-#else
-  // The 5x7 table draws Latin-1, so accents are kept as written; hanzi have no glyph.
-  CHECK_EQ(fold_to_font("¿Cómo estás? ¡Sí! Ñandú"), std::string("¿Cómo estás? ¡Sí! Ñandú"));
-  CHECK_EQ(fold_to_font("\xE6\x97\xA5\xE6\x9C\xAC"), std::string("??"));
-#endif
-}
-
-TEST("font: prefix cuts a string between letters, never inside one") {
-  CHECK_EQ(hg::font::prefix("abc", 0), size_t(0));
-  // The cut lands between glyphs: the prefix holds whole code points, its columns
-  // fit the budget, and one more glyph would not.
-  const auto cut = hg::font::prefix("abc", 2);
-  CHECK(cut > 0);
-  CHECK(hg::font::columns("abc") >= 3);  // six columns never hold three wide glyphs
-  CHECK(hg::font::columns(std::string_view("abc").substr(0, cut)) <= 2);
-  CHECK_EQ(hg::font::prefix("abc", 9), size_t(3));
-#if HG_FONT_CJK
-  // A hanzi takes two columns; a cut that cannot fit it stops before it.
-  CHECK_EQ(hg::font::prefix("\xE6\x97\xA5z", 1), size_t(0));
-  CHECK_EQ(hg::font::prefix("\xE6\x97\xA5z", 2), size_t(3));
-  CHECK(hg::font::prefix("\xE6\x97\xA5z", 3) >= size_t(3));
-#else
-  CHECK_EQ(hg::font::prefix("a\xC3\xB1z", 1), size_t(1));  // "a"
-  CHECK_EQ(hg::font::prefix("a\xC3\xB1z", 2), size_t(3));  // "añ"
-#endif
-  const std::string_view accented = "a\xC3\xB1z";
-  CHECK_EQ(hg::font::prefix(accented, 99), accented.size());  // all of it when it fits
-}
-
 TEST("i18n: format fills placeholders in any order and keeps the ones it has no value for") {
   using hg::i18n::format;
   CHECK_EQ(format("{0} to change", {"BOOT"}), std::string("BOOT to change"));
@@ -175,32 +166,21 @@ TEST("i18n: format fills placeholders in any order and keeps the ones it has no 
 TEST("i18n: control names in words are translated, printed button names are kept") {
   using hg::i18n::control_name;
   CHECK_EQ(control_name(Lang::En, "Swipe down"), std::string("Swipe down"));
-  CHECK_EQ(control_name(Lang::Es, "Swipe down"), std::string("Desliza abajo"));
+  CHECK_EQ(control_name(Lang::Es, "Swipe down"), std::string("Desliza"));
   CHECK_EQ(control_name(Lang::Es, "BOOT"), std::string("BOOT"));
   CHECK_EQ(control_name(Lang::Es, "PWR"), std::string("PWR"));
 }
 
 namespace {
 
-struct Panel {
-  int w, h;
-  bool round;
-  // Profile knobs a panel may carry: a thin bezel (moji) and no top band. 0 /
-  // false keeps the inscribed-square defaults the other panels use.
-  int round_area_permille = 0;
-  bool no_top_band = false;
-};
-
 struct BlankDisplay : hg::Display {
   hg::DisplayInfo d;
   std::vector<uint16_t> fb;
-  BlankDisplay(int w, int h, bool round, int permille = 0, bool no_top_band = false)
-      : fb(static_cast<size_t>(w * h)) {
+  BlankDisplay(int w, int h, bool round, uint8_t font_scale = 1) : fb(static_cast<size_t>(w * h)) {
     d.width = static_cast<uint16_t>(w);
     d.height = static_cast<uint16_t>(h);
     d.round = round;
-    d.round_area_permille = static_cast<uint16_t>(permille > 0 ? permille : 707);
-    d.no_top_band = no_top_band;
+    d.font_scale = font_scale;
   }
   hg::DisplayInfo info() const override { return d; }
   uint16_t* framebuffer() override { return fb.data(); }
@@ -209,6 +189,7 @@ struct BlankDisplay : hg::Display {
 
 struct Columns {
   int line = 0;          // bottom-bar hints and hero captions (Ui: hero_cols)
+  int name = 0;          // a hero headline in a name panel (Ui: name_cols)
   int headline = 0;      // the header band of a text screen, at the larger scale
   int button = 0;        // one of the Prompt screen's two answer buttons
   int dash_heading = 0;  // a dashboard heading row
@@ -216,8 +197,8 @@ struct Columns {
 };
 
 // What ui.cpp fits on one line of each kind on this panel.
-Columns columns(const Panel& p) {
-  BlankDisplay display(p.w, p.h, p.round, p.round_area_permille, p.no_top_band);
+Columns columns(int w, int h, bool round, uint8_t font_scale = 1) {
+  BlankDisplay display(w, h, round, font_scale);
   hg::Ui ui(display);
   const hg::UiLayout& l = ui.layout();
   const int s = l.scale;
@@ -225,8 +206,8 @@ Columns columns(const Panel& p) {
   const int tx = 4 * s + r + r + 4 * s;
   Columns c;
   c.line = l.hero_cols;
+  c.name = l.name_cols;
   c.headline = (ui.area().width - tx - 2 * s) / (hg::font::kCellWidth * (s + 1));
-  c.line = l.hero_cols;
   const int cell = hg::font::kCellWidth * s, aw = ui.area().width, margin = 4 * s;
   const int bw = (aw - 2 * margin - 4 * s) / 2;
   c.button = (bw - 2 * s) / cell;
@@ -264,6 +245,8 @@ std::string filled(Lang lang, Msg m) {
     case Msg::NewSessionIn: a = "2"; break;
     case Msg::PairingCode: a = "ABCD1234"; break;
     case Msg::PhoneCode: a = "123456"; break;
+    case Msg::ProfileGreeting: a = "Equipo de trabajo"; break;  // a long profile name
+    case Msg::TimerLeft: a = "24:00:00"; break;  // the longest timer: 86400 s
     default: break;
   }
   return hg::i18n::format(hg::i18n::text(lang, m), {a, b});
@@ -280,17 +263,23 @@ constexpr Msg kLines[] = {
     Msg::NotConnected, Msg::HoldScreenWhileSpeaking, Msg::HoldButtonWhileSpeaking, Msg::DidntHearAnything,
     Msg::Cancelled, Msg::NewSessionIn, Msg::NewSession, Msg::MicUnavailable, Msg::AnsweredYes, Msg::AnsweredNo,
     Msg::PhonePaired, Msg::PhonePairingFailed, Msg::PhonePairingClosed, Msg::BluetoothUnavailable,
-    Msg::WifiSetupUnavailable,
+    Msg::WifiSetupUnavailable, Msg::ProfileListHint, Msg::ProfileCantSwitch, Msg::ProfileRefusedBusy,
+    Msg::ProfileRefusedUnknown, Msg::ProfileRefused, Msg::CameraTake, Msg::CameraHoldStill, Msg::CameraRetake,
+    Msg::CameraFailed,
     // hero headlines and one-line captions
     Msg::HiImHermes, Msg::AskMeAnything, Msg::UpShowsLastReply, Msg::SwipeDownForSessions,
-    Msg::ButtonShowsSessions, Msg::LowBattery, Msg::Listening, Msg::SpeakNowPause, Msg::LiftFingerToSend,
+    Msg::ButtonShowsSessions, Msg::LowBattery, Msg::Listening, Msg::SpeakNowPause, Msg::LiftFingerToSend, Msg::OfflineStillRecording, Msg::ReconnectingToSend,
     Msg::ReleaseToSend, Msg::Thinking, Msg::HermesAsks, Msg::Restarting, Msg::Updating, Msg::SetupNeeded,
-    Msg::NoNetwork, Msg::Authenticating, Msg::ConnectingToHermes, Msg::PairingCode, Msg::PairThisDevice,
+    Msg::NoNetwork, Msg::Authenticating, Msg::ConnectingToHermes, Msg::PairingCode, Msg::PairThisDevice, Msg::RefusedByRoute,
+    Msg::ProfileSwipe, Msg::ProfileInSettings,
+    Msg::TimerLeft, Msg::TapScreenToStop,
 };
+// A profile's greeting, in the name panel a touchscreen taps.
+constexpr Msg kNameLines[] = {Msg::ProfileGreeting};
 // Headlines of text screens: larger letters after the status indicator.
 constexpr Msg kHeadlines[] = {
-    Msg::Settings, Msg::WifiSetup, Msg::PairAPhone, Msg::PhoneCode, Msg::Running, Msg::Speaking, Msg::Ready,
-    Msg::Image, Msg::NWaiting, Msg::NBusy, Msg::AllIdle,
+    Msg::Settings, Msg::WifiSetup, Msg::PairAPhone, Msg::PhoneCode, Msg::Speaking, Msg::Ready,
+    Msg::Image, Msg::NWaiting, Msg::NBusy, Msg::AllIdle, Msg::ProfileListTitle,
 };
 
 // The Prompt screen's answer buttons.
@@ -299,42 +288,162 @@ constexpr Msg kButtons[] = {Msg::TapYes, Msg::ButtonYes, Msg::SwipeNo, Msg::Butt
 constexpr Msg kDashHeadings[] = {Msg::HermesSessions, Msg::NoSessions, Msg::DashStatus};
 constexpr Msg kDashValues[] = {Msg::DashApproval, Msg::DashBusy, Msg::DashIdle};
 
+struct Panel {
+  int w, h;
+  bool round;
+  uint8_t font_scale = 1;  // as the board's lcd.font_scale sets it
+};
+// Every panel a board or simulator profile uses (the AMOLEDs as their UI area).
 constexpr Panel kPanels[] = {
-    {240, 135, false}, {320, 170, false}, {240, 240, false}, {240, 240, true, 860, true}, {320, 240, false},
+    {240, 135, false}, {320, 170, false}, {240, 240, false}, {240, 240, true}, {240, 284, false}, {320, 240, false},
     {360, 360, true},  {368, 432, false}, {410, 486, false}, {466, 466, true}, {480, 320, false},
     {480, 480, false}, {800, 480, false},
+    {480, 480, true},
+    {360, 360, true, 2},  // the Knob-Touch-LCD-1.8 (lcd.font_scale = 2 in board.cpp)
+    {320, 172, false, 2},  // ESP32-S3-Touch-LCD-1.47 landscape (lcd.font_scale = 2 in board.cpp)
 };
 
 void check_fits(Lang lang, Msg m, int cols, const Panel& p) {
   const std::string en = filled(Lang::En, m), t = filled(lang, m);
-  const int en_cols = hg::font::columns(en), t_cols = hg::font::columns(t);
+  const int en_cols = static_cast<int>(hg::font::length(en)), t_cols = static_cast<int>(hg::font::length(t));
   if (en_cols <= cols && t_cols > cols)
     check::fail(__FILE__, __LINE__,
                 std::string(hg::i18n::info(lang).code) + " \"" + t + "\" (" + std::to_string(t_cols) + ") is cut at " +
                     std::to_string(cols) + " columns on " + std::to_string(p.w) + "x" + std::to_string(p.h) +
-                    (p.round ? " round" : "") + ", where \"" + en + "\" fits");
+                    (p.round ? " round" : "") + (p.font_scale > 1 ? " at font scale " + std::to_string(p.font_scale) : "") + ", where \"" + en + "\" fits");
 }
 
 }  // namespace
 
 TEST("i18n: one-line text fits wherever the English fits") {
-  // The 16 px face (HG_FONT_PX=16) ships only on the movecall-moji round panel, so
-  // its fit contract is checked there; the other panels run the 12 px face, whose
-  // contract this same binary just proved when built with HG_FONT_PX=12.
-#if HG_FONT_PX == 16
-  constexpr Panel fit_panels[] = {{240, 240, true, 860, true}};
-#else
-  constexpr const Panel (&fit_panels)[sizeof(kPanels) / sizeof(kPanels[0])] = kPanels;
-#endif
-  for (const Panel& p : fit_panels) {
-    const Columns c = columns(p);
-    CHECK(c.line > 0 && c.headline > 0 && c.button > 0 && c.dash_heading > 0 && c.dash_value > 0);
+  for (const Panel& p : kPanels) {
+    const Columns c = columns(p.w, p.h, p.round, p.font_scale);
+    CHECK(c.line > 0 && c.name > 0 && c.headline > 0 && c.button > 0 && c.dash_heading > 0 && c.dash_value > 0);
     for (Lang lang : translations()) {
       for (Msg m : kLines) check_fits(lang, m, c.line, p);
+      for (Msg m : kNameLines) check_fits(lang, m, c.name, p);
       for (Msg m : kHeadlines) check_fits(lang, m, c.headline, p);
       for (Msg m : kButtons) check_fits(lang, m, c.button, p);
       for (Msg m : kDashHeadings) check_fits(lang, m, c.dash_heading, p);
       for (Msg m : kDashValues) check_fits(lang, m, c.dash_value, p);
     }
   }
+}
+
+// The timer's lines on the 128x128 panel (the AIPI Lite, the smallest board with a speaker), which the
+// panel list above does not run every message on.
+TEST("i18n: the timer's one-line texts fit the 128x128 panel in every language") {
+  const Panel p{128, 128, false};
+  const Columns c = columns(p.w, p.h, p.round);
+  for (Lang lang : translations()) {
+    check_fits(lang, Msg::TimerLeft, c.line, p);
+    check_fits(lang, Msg::TapScreenToStop, c.line, p);
+  }
+}
+
+// A spoken reply's caption under the talking face: only where the face stays above its smallest size
+// with two caption lines under it, and there its "Speaking" headline fits one caption line.
+TEST("i18n: the talking face's two-line caption is on only where it fits, and its headline fits there") {
+  for (const Panel& p : kPanels) {
+    BlankDisplay display(p.w, p.h, p.round, p.font_scale);
+    const bool fits = hg::Ui(display).talk_caption_fits();
+    // The 240x135, the 240x240 round (the Spotpear 1.28-BOX) and the 1.47's landscape 320x172 at
+    // twice the text size show the face at its smallest size.
+    const bool small = p.h == 135 || (p.w == 240 && p.round) || (p.w == 320 && p.h == 172);
+    CHECK_EQ(fits, !small);
+    if (!fits) continue;
+    const Columns c = columns(p.w, p.h, p.round, p.font_scale);
+    for (Lang lang : translations()) check_fits(lang, Msg::Speaking, c.line, p);
+  }
+  BlankDisplay aipi(128, 128, false);
+  CHECK(!hg::Ui(aipi).talk_caption_fits());
+}
+
+// ---------------------------------------------------------------------------
+// The font's Latin-1 half and UTF-8 text (hg/font.hpp)
+
+TEST("font: every Latin-1 code point has its own glyph") {
+  const std::string question(hg::font::glyph('?'));
+  std::set<std::string> seen;
+  for (char32_t cp = 0xA1; cp <= 0xFF; ++cp) {
+    CHECK(hg::font::drawable(cp));
+    const std::string g(hg::font::glyph(cp));
+    CHECK_EQ(g.size(), size_t(hg::font::kGlyphWidth * hg::font::kGlyphHeight));
+    if (cp == 0xAD) continue;  // a soft hyphen draws as a short dash
+    if (g == question) check::fail(__FILE__, __LINE__, "U+" + std::to_string(cp) + " draws as '?'");
+    if (!seen.insert(g).second) check::fail(__FILE__, __LINE__, "U+" + std::to_string(cp) + " repeats a glyph");
+  }
+  // An accented letter is not its base letter, and the accents differ from each other.
+  CHECK(std::string(hg::font::glyph(U'á')) != hg::font::glyph(U'a'));
+  CHECK(std::string(hg::font::glyph(U'á')) != hg::font::glyph(U'à'));
+  CHECK(std::string(hg::font::glyph(U'ñ')) != hg::font::glyph(U'n'));
+  CHECK(std::string(hg::font::glyph(U'Ñ')) != hg::font::glyph(U'N'));
+  // Outside ASCII and Latin-1: the '?' glyph.
+  CHECK_EQ(std::string(hg::font::glyph(0x20AC)), question);  // €
+  CHECK_EQ(std::string(hg::font::glyph(0x7F)), question);
+  CHECK(!hg::font::drawable(0x0101));
+}
+
+TEST("font: every Russian letter has its own glyph") {
+  const std::string question(hg::font::glyph('?'));
+  std::set<std::string> seen;
+  std::vector<char32_t> letters;
+  for (char32_t cp = 0x410; cp <= 0x44F; ++cp) letters.push_back(cp);
+  letters.push_back(0x401);  // Ё
+  letters.push_back(0x451);  // ё
+  for (char32_t cp : letters) {
+    CHECK(hg::font::drawable(cp));
+    CHECK_EQ(hg::font::columns(cp), 1);
+    const std::string g(hg::font::glyph(cp));
+    CHECK_EQ(g.size(), size_t(hg::font::kGlyphWidth * hg::font::kGlyphHeight));
+    if (g == question) check::fail(__FILE__, __LINE__, "U+" + std::to_string(cp) + " draws as '?'");
+    if (!seen.insert(g).second) check::fail(__FILE__, __LINE__, "U+" + std::to_string(cp) + " repeats a glyph");
+  }
+  // Letters that look the same as Latin ones share the Latin glyph on purpose.
+  CHECK_EQ(std::string(hg::font::glyph(U'А')), std::string(hg::font::glyph(U'A')));
+  CHECK_EQ(std::string(hg::font::glyph(U'о')), std::string(hg::font::glyph(U'o')));
+  // The rest do not borrow a Latin shape.
+  CHECK(std::string(hg::font::glyph(U'И')) != hg::font::glyph(U'N'));
+  CHECK(std::string(hg::font::glyph(U'Я')) != hg::font::glyph(U'R'));
+  CHECK(std::string(hg::font::glyph(U'Й')) != hg::font::glyph(U'И'));
+  CHECK(std::string(hg::font::glyph(U'ё')) != hg::font::glyph(U'е'));
+  // Other Cyrillic (Ukrainian і, ї, є, Serbian ђ, ...) is outside the font.
+  CHECK(!hg::font::drawable(0x0456));
+  CHECK(!hg::font::drawable(0x0452));
+  CHECK_EQ(hg::font::length("Привет"), size_t(6));
+}
+
+TEST("font: UTF-8 reads one code point at a time and survives malformed input") {
+  const std::string_view s = "añ€😀";
+  size_t i = 0;
+  CHECK(hg::font::next(s, i) == U'a' && i == 1);
+  CHECK(hg::font::next(s, i) == U'ñ' && i == 3);
+  CHECK(hg::font::next(s, i) == 0x20AC && i == 6);
+  CHECK(hg::font::next(s, i) == 0x1F600 && i == 10);
+  CHECK_EQ(hg::font::length(s), size_t(4));
+  CHECK_EQ(hg::font::prefix(s, 2), size_t(3));
+  CHECK_EQ(hg::font::prefix(s, 9), s.size());
+  // Truncated, overlong-lead and stray bytes each read as U+FFFD and advance one byte.
+  for (std::string_view bad : {std::string_view("\xC3"), std::string_view("\xE2\x82"), std::string_view("\x80"),
+                               std::string_view("\xC0\xAF"), std::string_view("\xFF")}) {
+    size_t j = 0;
+    CHECK(hg::font::next(bad, j) == 0xFFFD && j == 1);
+    CHECK_EQ(hg::font::length(bad), bad.size());
+  }
+}
+
+TEST("font: widths, wrapping and cuts count letters, not bytes") {
+  CHECK_EQ(hg::Canvas::text_width("ñandú", 1), hg::Canvas::text_width("nandu", 1));
+  const auto lines = hg::wrap_text("canción para el niño pequeño", 10);
+  CHECK_EQ(lines.size(), size_t(4));
+  if (lines.size() == 4) {
+    CHECK_EQ(lines[0], std::string("canción"));
+    CHECK_EQ(lines[1], std::string("para el"));
+    CHECK_EQ(lines[2], std::string("niño"));
+    CHECK_EQ(lines[3], std::string("pequeño"));  // 7 letters in 9 bytes: fits a 10-column line
+  }
+  // A word longer than the line splits between letters, never inside one.
+  const auto split = hg::wrap_text("ñññññññ", 3);
+  CHECK_EQ(split.size(), size_t(3));
+  for (const auto& l : split) CHECK(hg::font::length(l) <= 3 && hg::font::prefix(l, 99) == l.size());
 }

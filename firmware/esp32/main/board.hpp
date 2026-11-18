@@ -53,19 +53,31 @@ struct RgbPanelConfig {
   RgbTimings timings{};   // panel scanout timings (per-datasheet)
 };
 
-// MIPI-DSI panel settings for the CrowPanel Advanced P4; DSI pins are SoC-dedicated.
+// MIPI-DSI panel controller. Only meaningful when bus.type == Type::Dsi.
+// St7123 uses Espressif esp_lcd_st7123 1.0.2 and that component's default init.
+// No board selects it yet.
+enum class DsiController { Ek79007, Jd9365, St7123 };
+
+// A MIPI-DSI panel: a serial bus on dedicated SoC pins (no GPIO numbers), a
+// PHY that needs its own internal LDO rail, and a DPI clock. The CrowPanel and
+// Waveshare P4 boards use this.
 struct DsiPanelConfig {
-  int lanes = 2;
-  int lane_bit_rate_mbps = 900;
-  int dpi_clock_mhz = 51;
-  int ldo_channel = 3;
-  int ldo_voltage_mv = 2500;
-  bool use_dma2d = true;
-  uint16_t hsync_pulse_width = 70, hsync_back_porch = 160, hsync_front_porch = 160;
-  uint16_t vsync_pulse_width = 10, vsync_back_porch = 23, vsync_front_porch = 12;
+  DsiController controller = DsiController::Ek79007;  // DSI panel controller
+  int lanes = 2;                  // DSI data lanes
+  int lane_bit_rate_mbps = 900;   // per-lane bit rate
+  int dpi_clock_mhz = 51;         // pixel clock
+  int ldo_channel = 3;            // internal LDO channel powering the DSI PHY
+  int ldo_voltage_mv = 2500;      // that channel's voltage
+  bool use_dma2d = true;          // DMA2D-assisted flush, falling back to a CPU copy
+  // Let ESP-IDF choose the DSI PHY clock source for the chip revision instead of
+  // MIPI_DSI_PHY_CLK_SRC_DEFAULT (needed on the 7B's P4 rev 3.x).
+  bool phy_clk_auto = false;
+  // Video timing; the P4's EK79007 panel's porches are wide.
+  int hsync_pulse_width = 70, hsync_back_porch = 160, hsync_front_porch = 160;
+  int vsync_pulse_width = 10, vsync_back_porch = 23, vsync_front_porch = 12;
 };
 
-enum class LcdController { St7789, Box3, CoreS3, St77916, Gc9a01, Sh8601 };
+enum class LcdController { St7789, Box3, CoreS3, St77916, Gc9a01, Sh8601, Ili9341, Spd2010 };
 
 // Which vendor initialization table an ST77916 panel gets. Waveshare's 1.85C
 // tables are chosen by the panel ID the driver reads; the ESP-VoCat's glass
@@ -96,18 +108,20 @@ struct LcdConfig {
   int d1 = -1, d2 = -1, d3 = -1;  // QSPI data0 uses mosi
   bool round = false;
   uint8_t font_scale = 1;  // UI text scale multiplier, clamped so the scale stays 1..4 (hg::DisplayInfo)
-  // Most body lines a text screen may use (hg::DisplayInfo::body_rows_cap); 0 = no cap.
-  uint8_t body_rows_cap = 0;
-  uint16_t round_area_permille = 707;  // UI square on a round panel, of the short side
-  bool no_bottom_bar = false;  // the board has no button hints to show
-  bool no_top_band = false;  // the board has no touch: the header replaces the top band
-  bool calibration = false;  // panel/area rulers on screen (bring-up only)
+  uint16_t mascot_px = 0;   // largest mascot bitmap; 0 keeps the largest that fits
+  // SPI data-in (the CYD wires its panel's SDO to GPIO 12); -1 when unused.
+  // Last, so positional initializers written before it existed keep their meaning.
+  int miso = -1;
 };
 
 struct I2sMicConfig {
   bool enabled = false;
   int sck = -1, ws = -1, sd = -1;
   bool pdm = false;  // PDM mic: sck carries the PDM clock, sd the data; ws unused
+  // Last, so positional initializers written before it existed keep their meaning.
+  // MEMS mics (INMP441, MSM261) put a 24-bit sample in one 32-bit slot.
+  // L/R tied high selects the right slot. Left stays the default.
+  bool right = false;
 };
 
 struct I2sSpeakerConfig {
@@ -126,10 +140,13 @@ struct P4SpeakerConfig {
 };
 
 // Which vendor bring-up table a CO5300 panel needs. The round 466x466 1.75"
-// modules write extra page-2 registers; the rectangular 368x448 1.8" module,
-// the 410x502 2.06" watch and the 480x480 2.16" board use the shorter tables
-// from Waveshare's board support packages.
-enum class AmoledPanel { Co5300_466, Co5300_368, Co5300_410, Co5300_480 };
+// modules write extra page-2 registers. The 1.32" round module uses the same
+// 466 window with the short table and a 100 ms sleep-out. The 1.43C round
+// module uses that short table with a column offset of 8 and MADCTL 0xC0.
+// The rectangular 368x448 1.8" module, the 410x502 2.06" watch and the
+// 480x480 2.16" board use the shorter tables from Waveshare's board support
+// packages.
+enum class AmoledPanel { Co5300_466, Co5300_368, Co5300_410, Co5300_480, Co5300_132, Co5300_143c };
 
 // QSPI AMOLED with a CO5300 controller (round 466x466, rectangular 368x448 or 410x502).
 struct AmoledConfig {
@@ -148,13 +165,14 @@ struct I2cBusConfig {
   uint32_t hz = 400000;
 };
 
-// ES8311/AW88298 (speaker) and the microphone ADC sharing one duplex I2S bus,
-// controlled over the I2C bus.
-enum class SpeakerCodec { Es8311, Aw88298 };
+// ES8311, ES8388 or AW88298 (speaker) and the microphone ADC sharing one duplex
+// I2S bus, controlled over the I2C bus. Es8388 is the speaker only. No board
+// selects Es8388 yet.
+enum class SpeakerCodec { Es8311, Aw88298, Es8388 };
 
-// The microphone ADC: an ES7210 for MEMS microphones, or the ES8311's own ADC
-// when the board wires an analog microphone to the speaker codec.
-enum class MicCodec { Es7210, Es8311 };
+// The microphone ADC: an ES7210 or ES7243E for MEMS microphones, or the
+// ES8311's own ADC when the board wires an analog microphone to the speaker codec.
+enum class MicCodec { Es7210, Es7243e, Es8311 };
 
 struct CodecAudioConfig {
   bool enabled = false;
@@ -163,31 +181,72 @@ struct CodecAudioConfig {
   float amp_supply_v = 5.0f;  // amplifier supply; the ES8311 driver sets its output level from it
   float mic_gain_db = 24.0f;
   float vad_min_rms = 500.0f;  // tap mode's speech floor for this mic (DeviceProfile::vad_min_rms)
+  bool drop_silent_recordings = false;  // vad_min_rms was measured here: hold mode drops recordings without speech
   SpeakerCodec speaker = SpeakerCodec::Es8311;
   MicCodec mic = MicCodec::Es7210;
   bool stereo32 = false;      // two 32-bit I2S slots per frame instead of one 16-bit slot
   bool rmnm_mics = false;     // the ES7210 sends four 16-bit channels R M N M; average the M slots (ws185.hpp)
   bool speaker_pa = false;    // CodecSpeaker drives `pa`, not esp_codec_dev (see CodecAudio::begin)
+  bool dac_fade_ramp = false; // ES8311 speaker only: its DAC ramps volume on mute/unmute (reg 0x37)
   bool dac_mclk = true;       // false: the ES8311 derives its clock from BCLK
   uint8_t es7210_mics = 0x03;  // ES7210_SEL_MIC1 | ES7210_SEL_MIC2
+  // ES7243E 7-bit I2C address when MicCodec::Es7243e (CodecAudio::begin shifts it to the
+  // 8-bit form esp_codec_dev takes). An older ES7243 at 0x13 is used instead when it answers
+  // and this address doesn't.
+  uint8_t mic_addr = 0x10;
+  // Read the microphone from the right I2S slot instead of the left (mono 16-bit only).
+  bool mic_right_slot = false;
 };
 
 // Capacitive touch on the I2C bus: hold to talk, tap, swipe down to cancel.
-enum class TouchController { Cst9217, Box3, Ft5x06, Cst816, Gt911 };
+enum class TouchController { Cst9217, Box3, Ft5x06, Cst816, Gt911, Spd2010, Axs5106 };
 
 struct TouchConfig {
   bool enabled = false;
   uint8_t addr = 0x5A;
   int rst = -1;
   int int_gpio = -1;  // touch INT line; -1 when not wired (driver polls instead)
+  // INT low wakes the chip from light sleep while dozing (FT5x06 with INT only): for a
+  // controller whose report expires before the next doze poll would read it.
+  bool int_wakes = false;
   uint16_t width = 0, height = 0;
   bool mirror_x = false, mirror_y = false;
   bool swap_xy = false;  // CST9217 report: exchange x and y after mirroring (esp_lcd_touch order)
   int16_t offset_y = 0;  // subtracted from y when the UI starts below the panel's first row
+  // Pixels per inch of the glass, so touch targets come out about 7 mm tall (hg::DeviceProfile::touch_ppi).
+  // Estimates from the panel's nominal diagonal (diameter if round) and resolution, not measurements.
+  uint16_t ppi = 0;
   TouchController controller = TouchController::Cst9217;
   // The touch controller's own I2C bus; unset = the board's shared bus. When set,
-  // an expander key (pwr_key) is read on this bus too.
+  // an expander key (pwr_key) is read on this bus too, unless pwr_key names its own.
   I2cBusConfig bus{};
+  // Touch INT wired to the pwr_key expander instead of a GPIO: its bit in input port 0,
+  // active low; -1 when not. The touch controller is then read only while INT is low.
+  // An SPD2010 polled between reports answers "no points", which reads as a lift.
+  int8_t int_expander_bit = -1;
+};
+
+// An accelerometer on the I2C bus (face-down sleep). The port maps its
+// axes into the device frame: +x towards the right of the picture, +y towards
+// its top, +z out of the screen towards the viewer. `*_from` picks the sensor
+// axis feeding a device axis (0 = x, 1 = y, 2 = z), `*_sign` its direction.
+enum class ImuChip { Qmi8658, Bmi270 };
+
+struct ImuConfig {
+  bool enabled = false;
+  uint8_t addr = 0x6B;
+  int8_t x_from = 0, y_from = 1, z_from = 2;
+  int8_t x_sign = 1, y_sign = 1, z_sign = 1;
+  ImuChip chip = ImuChip::Qmi8658;
+};
+
+// An RTC on the I2C bus, keeping UTC across power loss.
+enum class RtcChip { Pcf85063, Rx8130 };
+
+struct RtcConfig {
+  bool enabled = false;
+  uint8_t addr = 0x51;
+  RtcChip chip = RtcChip::Pcf85063;
 };
 
 // A key whose level is read from a TCA9554 or PCF8574 I/O expander input (e.g.
@@ -199,6 +258,10 @@ struct ExpanderKeyConfig {
   uint8_t bit = 0;
   bool active_high = true;
   bool pcf8574 = false;  // a PCF8574 has no registers: read its port directly
+  // The expander's own I2C bus when it isn't the touch controller's (TouchConfig::bus).
+  // Register 0 is read either way: a PCA9535's input port 0 sits there too, so `bit`
+  // 0-7 covers its P0 pins.
+  I2cBusConfig bus{};
 };
 
 // Reset lines on a TCA9554 I/O expander, pulsed before the display and touch
@@ -207,6 +270,26 @@ struct ExpanderResetConfig {
   uint8_t addr = 0x20;
   uint8_t mask = 0;  // 0 = no expander resets
   uint16_t hold_ms = 10, settle_ms = 50;  // low pulse, then the wait before the display starts
+};
+
+// TCA9554 or PCA9535 outputs that stay owned after boot. `low` is driven low and held
+// (an active-low enable). `reset` is pulsed low, then left high. `backlight`
+// starts high and follows screen brightness as on or off. `addr` 0 probes
+// 0x38 (TCA9554A, A2=A1=A0=0) and then 0x20 (TCA9554).
+//
+// A PCA9535 (16 bits, P0 in the low byte) also takes `startup_high`: supply
+// switches driven high at boot. Its bits are set before the app brings up
+// Wi-Fi, so a `power_hold` among them latches the supply while the power key
+// is still held. Driving `power_hold` low again powers the board off.
+// `startup_high` and `power_hold` are ignored on a TCA9554.
+struct ExpanderLevelConfig {
+  bool enabled = false;
+  uint8_t addr = 0;
+  bool pca9535 = false;
+  uint16_t low = 0, reset = 0, backlight = 0;
+  uint16_t startup_high = 0;
+  uint16_t hold_ms = 10, settle_ms = 20;
+  uint16_t power_hold = 0;
 };
 
 // A supply switch driven straight from a GPIO, set once at boot before any
@@ -227,6 +310,9 @@ struct EncoderConfig {
   // Mouse-wheel style encoder: one low pulse per detent on exactly one channel,
   // and the channel picks the direction. False = classic quadrature.
   bool pulse_per_detent = false;
+  // Quadrature steps from one detent to the next: 4 when the wheel rests only at A=B=1,
+  // 2 when it rests at both A=B=1 and A=B=0 (the SenseCAP Watcher's wheel).
+  uint8_t steps_per_detent = 4;
 };
 
 // A battery behind a resistive divider, with a latch that keeps it powered.
@@ -251,6 +337,13 @@ struct LatchPowerConfig {
   int key = -1;
 };
 
+// A microSD slot wired for 4-bit SDIO (port_sdlog.cpp mirrors the device log
+// to /sdcard/hermes.log). Pins are -1 when the board has no slot.
+struct SdConfig {
+  bool enabled = false;
+  int clk = -1, cmd = -1, d0 = -1, d1 = -1, d2 = -1, d3 = -1;
+};
+
 struct BoardConfig {
   const char* name;
   LcdConfig lcd;
@@ -263,8 +356,11 @@ struct BoardConfig {
   I2cBusConfig i2c;
   CodecAudioConfig codec;
   TouchConfig touch;
+  ImuConfig imu;
+  RtcConfig rtc;
   ExpanderKeyConfig pwr_key;
   ExpanderResetConfig expander_reset;
+  ExpanderLevelConfig expander_levels;
   PowerRail power_rails[2];
   uint16_t power_rails_settle_ms = 0;  // wait after switching the rails on
   bool axp2101 = false;
@@ -277,18 +373,25 @@ struct BoardConfig {
   // The battery's measured discharge and charge curves (drivers/battery_curve.hpp).
   hg::Curve battery_curve, battery_charge_curve;
   bool cores3 = false;
+  bool sticks3 = false;  // the M5PM1 switches the LCD rail and the speaker amplifier
+  bool stopwatch = false;  // M5IOE1 supplies/resets/amplifier and the M5PM1 (StopWatchBoard)
   // A phone companion app over Bluetooth LE (port_ble.cpp). Experimental: needs
   // the Bluetooth lines in the board's sdkconfig.defaults and stays off until the
   // board passes the checks in docs/hardware-validation.md#bluetooth.
   bool bluetooth = false;
+  // Reaching Hermes over a Tailscale tailnet (port_tailnet.cpp, docs/tailnet.md).
+  // Experimental: needs the tailnet lines in the board's sdkconfig.defaults (PSRAM
+  // boards only) and stays off until the board passes the checks in
+  // docs/hardware-validation.md#tailnet.
+  bool tailnet = false;
   LatchPowerConfig latch_power;
+  SdConfig sd;  // a microSD slot wired for logging (port_sdlog.cpp)
   int status_led = -1;
-  // Draw this board's own robot face instead of the mascot bitmaps (hg/robot_face.hpp).
-  bool robot_face = false;
-  // Draw this board's own pure-emoji face instead (hg/emoji_face.hpp).
-  bool emoji_face = false;
-  // The idle screen's greeting; nullptr keeps the translated default.
-  const char* greeting = nullptr;
+  // A speaker driven by the chip's own DAC, with no I2S and no codec: the pin the
+  // board's amplifier input hangs off (25 = DAC channel 0, 26 = DAC channel 1),
+  // e.g. the CYD's SC8002B on GPIO26. It plays the boot beeps (port_dac.cpp); the
+  // gadget's replies are not routed there yet.
+  int speaker_dac = -1;
   const char* talk_label = "TALK";
   const char* cancel_label = "CANCEL";
 };

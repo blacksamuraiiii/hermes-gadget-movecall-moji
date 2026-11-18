@@ -22,6 +22,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -67,13 +68,25 @@ class DeviceStore:
 
     def _save(self) -> None:
         self._dir.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_name(f"{self._path.stem}.{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(self._data, indent=2, sort_keys=True), encoding="utf-8")
+        # A unique temporary file, created mode 600: two stores in one process (the gateway's, and the
+        # CLI's or the dashboard's) writing at once each replace their own, never the other's.
+        fd, tmp = tempfile.mkstemp(dir=self._dir, prefix=f"{self._path.stem}.", suffix=".tmp")
         try:
-            os.chmod(tmp, 0o600)
-        except OSError:
-            pass
-        os.replace(tmp, self._path)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(self._data, indent=2, sort_keys=True))
+            # Windows refuses to replace a file another replace or reader holds at that moment
+            # (PermissionError); it frees up within milliseconds, so try a few times.
+            for attempt in range(10):
+                try:
+                    os.replace(tmp, self._path)
+                    break
+                except PermissionError:
+                    if attempt == 9:
+                        raise
+                    time.sleep(0.01)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
 
     # -- enrollment -----------------------------------------------------------
 
@@ -177,3 +190,29 @@ class DeviceStore:
             self._load()
             if self._data["pairing"].pop(device_id, None) is not None:
                 self._save()
+
+    # -- owner binding ----------------------------------------------------------
+    # One empty file per device this plugin may approve in other profiles. It lives outside
+    # devices.json, whose records 'forget' and pending expiry delete and whose writers in two
+    # processes share no lock, and nothing deletes it: revoking the device on the default profile
+    # is what removes its access.
+
+    def bind_to_owner(self, device_id: str) -> None:
+        """Durably mark ``device_id``; raises ``OSError`` when that cannot be guaranteed."""
+        directory = self._dir / "owner-bound"
+        directory.mkdir(parents=True, exist_ok=True)
+        fd = os.open(directory / device_id, os.O_WRONLY | os.O_CREAT, 0o600)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        if hasattr(os, "O_DIRECTORY"):  # POSIX: make the new names durable too
+            for parent in (directory, self._dir):
+                fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+
+    def owner_bound(self, device_id: str) -> bool:
+        return (self._dir / "owner-bound" / device_id).exists()

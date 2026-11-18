@@ -19,7 +19,7 @@ from hermes_gadget_plugin import protocol
 class Device:
     """A bare protocol client: says what the firmware says, records what it receives."""
 
-    def __init__(self, url: str, *, key: bytes | None = None, sleeping: bool | None = None):
+    def __init__(self, url: str, *, key: bytes | None = None, sleeping: bool | None = None, dashboard: bool | int = False):
         from websockets.sync.client import connect
 
         self.key = key or secrets.token_bytes(32)
@@ -31,6 +31,8 @@ class Device:
                                                                                   "format": "rgb565"}}})
         if sleeping is not None:
             hello["display_sleeping"] = sleeping
+        if dashboard:
+            hello["caps"]["dashboard"] = {"v": int(dashboard)}  # True: layout 1; a number: that layout
         self.ws.send(json.dumps(hello))
         challenge = json.loads(self.ws.recv(timeout=5))
         if challenge["enrolled"]:
@@ -221,3 +223,77 @@ def test_the_simulated_firmware_holds_a_card_until_its_screen_wakes(devserver, m
     assert sim.wait_for(lambda: not session.display_sleeping, timeout=5)
     assert sim.wait_screen("card", timeout=5)
     assert sim.last_received("display")["title"] == "Timer"
+
+
+def test_the_simulated_firmware_sleeps_face_down(devserver, make_sim):
+    """End to end with the C++ core: lying face down sleeps the screen, turning it over wakes it."""
+    hub, _brain, url = devserver()
+    sim = make_sim(url, board="sim-466x466-round")
+    assert sim.wait_screen("ready", timeout=10)
+    session = next(iter(hub.sessions.values()))
+    assert sim.console("set face_down_sleep on").startswith("@ok")
+    sim.set_face_down(True)
+    assert sim.wait_for(lambda: sim.status()["face_down"], timeout=5)
+    assert sim.peripherals.backlight == 0
+    assert sim.wait_for(lambda: session.display_sleeping, timeout=5)
+
+    sim.set_face_down(False)
+    assert sim.wait_for(lambda: not sim.status()["face_down"], timeout=5)
+    assert sim.peripherals.backlight > 0
+    assert sim.wait_for(lambda: not session.display_sleeping, timeout=5)
+
+    plain = make_sim(url, state="no-motion")
+    assert plain.wait_screen("ready", timeout=10)
+    assert "face_down" not in plain.status()
+
+
+def test_the_simulated_firmware_rests_on_a_clock(devserver, make_sim):
+    """End to end with the C++ core: after a rest the round board shows the clock at 70% of the
+    brightness setting; a tap brings Ready back at full brightness without recording."""
+    hub, _brain, url = devserver()
+    sim = make_sim(url, board="sim-466x466-round")
+    assert sim.wait_screen("ready", timeout=10)
+    session = next(iter(hub.sessions.values()))
+    sim.set_wall_time(time.strptime("2026-10-24T09:41", "%Y-%m-%dT%H:%M"))
+    assert sim.console("set talk_mode tap").startswith("@ok")  # a tap on Ready would record
+    assert sim.console("set clock 5").startswith("@ok")
+    assert sim.wait_screen("clock", timeout=10)
+    assert sim.peripherals.backlight == 70
+    assert not session.display_sleeping  # a lit screen: Hermes still sends what it has
+
+    sim.touch(True, 233, 233)
+    sim.run_for(0.05)
+    sim.touch(False, 233, 233)
+    assert sim.wait_screen("ready", timeout=5)
+    sim.run_for(0.5)
+    assert sim.status()["screen"] == "ready", "the tap only brought Ready back"
+    assert sim.peripherals.backlight == 100
+
+
+def test_a_held_layout_2_dashboard_reaches_the_device_with_its_widgets_when_the_screen_lights_up(
+        devserver, loop_thread):
+    from hermes_gadget_plugin import dashboard
+
+    hub, _brain, url = devserver()
+    device = Device(url, dashboard=2)
+    try:
+        assert _wait(lambda: device.device_id in hub.sessions)
+        session = hub.sessions[device.device_id]
+        device.frames()
+        device.screen(True)
+        assert _wait(lambda: session.display_sleeping)
+        older = dashboard.message([], [], [{"id": "t", "kind": "value", "label": "Office", "value": "21"}])
+        held = dashboard.message([], [], [{"id": "t", "kind": "value", "label": "Office", "value": "22"},
+                                          {"id": "b", "kind": "progress", "label": "Backup", "percent": 62}])
+        assert loop_thread.run(session.send_dashboard(older)) is False
+        assert loop_thread.run(session.send_dashboard(held)) is False  # only the latest is kept
+        assert [f for f in device.frames() if f.get("type") == "dashboard"] == []
+        device.screen(False)
+        woke = [f for f in device.frames() if f.get("type") == "dashboard"]
+        assert woke == [held] and woke[0]["v"] == 2 and len(woke[0]["widgets"]) == 2
+        # Lit again: an unchanged one is not repeated, and one whose widgets are gone goes at once.
+        assert loop_thread.run(session.send_dashboard(dict(held))) is False
+        assert loop_thread.run(session.send_dashboard(dashboard.message([], []))) is True
+        assert [f["widgets"] for f in device.frames() if f.get("type") == "dashboard"] == [[]]
+    finally:
+        device.close()

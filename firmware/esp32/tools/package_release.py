@@ -51,8 +51,14 @@ CHIP_NAMES = {"esp32": "ESP32", "esp32s2": "ESP32-S2", "esp32s3": "ESP32-S3", "e
               "esp32c6": "ESP32-C6", "esp32h2": "ESP32-H2", "esp32p4": "ESP32-P4"}
 # Boards built with idf.py, not PlatformIO, mapped to where their build command lives. Each one's
 # directory under boards/ has the board's name.
-IDF_BOARDS = {"crowpanel-p4-101": "the esp32p4 job in .github/workflows/ci.yml"}
+IDF_BOARDS = {
+    "crowpanel-p4-101": "the esp32p4 job in .github/workflows/ci.yml",
+    "ws-p4-touch-lcd-7b": "the esp32p4 job in .github/workflows/ci.yml",
+}
 BUILD_FILES = ("bootloader.bin", "partitions.bin", "ota_data_initial.bin", "firmware.bin")
+# Partitions a vendor filled at the factory and nothing can restore (the SenseCAP Watcher's
+# per-device `nvsfactory`). The installer writes around them; the full image, written whole, erases them.
+FACTORY_LABELS = ("nvsfactory",)
 
 
 class PackageError(Exception):
@@ -71,6 +77,7 @@ class Build:
     psram: str | None   # "hex", "octal", "quad" or None
     settings: tuple[int, int] | None  # the NVS partition: (offset, size)
     meta: dict
+    keep: tuple[tuple[int, int], ...] = ()  # factory partitions never to write: (offset, size)
 
 
 def _cstr(raw: bytes) -> str:
@@ -149,7 +156,11 @@ def build_for(project: Path, board: str, board_dir: str) -> Build:
     entries = partitions(table)
     apps = sorted((p for p in entries if p.type == TYPE_APP), key=lambda p: p.offset)
     otadata = next((p for p in entries if p.type == TYPE_DATA and p.subtype == SUBTYPE_OTA), None)
-    nvs = next((p for p in entries if p.type == TYPE_DATA and p.subtype == SUBTYPE_NVS), None)
+    nvs_entries = [p for p in entries if p.type == TYPE_DATA and p.subtype == SUBTYPE_NVS]
+    # The firmware's own settings are the partition labelled "nvs" (nvs_flash_init's), not a
+    # vendor's factory NVS listed before it.
+    nvs = next((p for p in nvs_entries if p.label == "nvs"), nvs_entries[0] if nvs_entries else None)
+    keep = tuple((p.offset, p.size) for p in entries if p.label in FACTORY_LABELS)
     if not apps:
         raise PackageError(f"{board}: the partition table has no app partition")
     app = read("firmware.bin")
@@ -171,7 +182,7 @@ def build_for(project: Path, board: str, board_dir: str) -> Build:
     return Build(
         board=board, image=merge(parts), app=app, version=version, image_board=image_board,
         chip=CHIP_NAMES.get(target, target.upper()), flash_size=sdk.get("CONFIG_ESPTOOLPY_FLASHSIZE", ""),
-        psram=psram, settings=(nvs.offset, nvs.size) if nvs else None, meta=meta)
+        psram=psram, settings=(nvs.offset, nvs.size) if nvs else None, meta=meta, keep=keep)
 
 
 def _file(path: Path, data: bytes) -> dict:
@@ -239,6 +250,8 @@ def write_release(builds: list[Build], out: Path, project: Path = PROJECT_DIR, n
             "app": _file(out / f"{stem}-app.bin", b.app),
             "settings": {"offset": b.settings[0], "size": b.settings[1]} if b.settings else None,
         })
+        if b.keep:
+            manifest["builds"][-1]["keep"] = [{"offset": offset, "size": size} for offset, size in b.keep]
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     sums = [f"{f['sha256']}  {f['path']}" for build in manifest["builds"] for f in (build["image"], build["app"])]
     licenses = manifest["licenses"]
@@ -259,6 +272,10 @@ def release_notes(manifest: dict, commit: str | None = None, changelog: str | No
     changes = f"\n{changes}\n" if changes else ""
     rows = "\n".join(f"| {b['title']} | `{b['image']['path']}` | `{b['app']['path']}` |" for b in manifest["builds"])
     chips = sorted({b["chip"].lower().replace("-", "") for b in manifest["builds"]})
+    kept = [b["title"] for b in manifest["builds"] if b.get("keep")]
+    factory = "" if not kept else (
+        f"\n**Don't write the full image of {', '.join(kept)} with esptool:** it would erase the "
+        "board's factory data. Use the browser installer, which writes around it.\n")
     plugin = "" if not commit else f"""
 **The Hermes plugin from the same commit:**
 
@@ -277,7 +294,7 @@ writing, and a device you reinstall keeps its settings.
 
 **Flash with esptool:** `esptool.py --chip {chips[0] if len(chips) == 1 else '<chip>'} write_flash 0x0 \
 hermes-gadget-<board>-{version}.bin`. This also erases the device's settings, so it pairs again as a new device.
-
+{factory}
 **Update a running device:** `hermes gadget update <device> hermes-gadget-<board>-{version}-app.bin`.
 {plugin}
 Checksums are in `SHA256SUMS`. License texts and notices are in `hermes-gadget-{version}-licenses.zip`.

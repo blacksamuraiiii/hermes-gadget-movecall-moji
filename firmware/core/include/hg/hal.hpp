@@ -12,6 +12,8 @@
 #include <string>
 #include <string_view>
 
+#include "hg/camera.hpp"
+
 namespace hg {
 
 enum class LogLevel : uint8_t { Debug, Info, Warn, Error };
@@ -29,31 +31,19 @@ struct DisplayInfo {
   // Multiplier on the UI's automatic font scale, for panels small enough that
   // the automatic pick reads as too small. The UI clamps the final scale.
   uint8_t font_scale = 1;
+  // Largest mascot bitmap, in pixels. 0 keeps the largest that fits.
+  uint16_t mascot_px = 0;
   // Extra left and right padding for the top bar's text, for a rectangular
   // panel with rounded corners.
   uint8_t corner_inset = 0;
   // An OLED/AMOLED panel: unlit pixels draw no power, so the background is
   // true black instead of the near-black used on backlit LCDs.
   bool emissive = false;
-  // How much of the panel a round screen lets the UI use, in thousandths of the short
-  // side. 707 is the square inscribed in the circle (the safe default); a board whose
-  // bezel is thin can take more, e.g. 860, and gets a bigger area, a bigger face and
-  // roomier text bands out of the same glass.
-  uint16_t round_area_permille = 707;
-  // No bottom bar: the board has no buttons worth a hint row (one BOOT key), so the
-  // leftover rows go to the text band. The hero band already uses the full height.
-  bool no_bottom_bar = false;
-  // No top band on a round panel: the board has no touch (no settings hold target
-  // lives there), so the header row starts at the top of the UI area instead.
-  bool no_top_band = false;
-  // Most body lines a text screen may use. 0 keeps the layout's own count; a small
-  // round panel caps it so the last line is not swallowed by the bezel.
-  uint8_t body_rows_cap = 0;
-  // Draw the panel border, the UI area's box and a centre cross (bring-up only).
-  bool calibration = false;
 };
 
-// A full-frame RGB565 framebuffer owned by the port (PSRAM on hardware).
+// An RGB565 framebuffer owned by the port (PSRAM on hardware). On a board that
+// cannot afford one for the whole panel it holds a band of rows instead; the UI
+// renders in bands of that size (see framebuffer_rows).
 class Display {
  public:
   virtual ~Display() = default;
@@ -62,6 +52,18 @@ class Display {
   // Push rows [y0, y1) to the panel. Rows are contiguous in the framebuffer.
   virtual void flush(uint16_t y0, uint16_t y1) = 0;
   virtual void set_backlight(uint8_t percent) { (void)percent; }
+  // How many panel rows the framebuffer holds at once, or 0 when it holds the
+  // whole panel. A board with no PSRAM reports a band here: the UI then draws
+  // every changed band once per window (see set_frame_origin), so nothing has
+  // to change in the drawing code.
+  virtual int framebuffer_rows() const { return 0; }
+  // Maps the framebuffer onto panel rows [y, y + framebuffer_rows()) for draws
+  // and flushes until it is moved again. Ignored when framebuffer_rows() is 0.
+  virtual void set_frame_origin(int y) { (void)y; }
+  // True once when the panel can no longer be trusted to show what was flushed
+  // (a transfer was lost and this display cannot hold the rows to resend them).
+  // The UI answers it by redrawing the whole screen.
+  virtual bool take_redraw_request() { return false; }
 };
 
 // Microphone: after start() succeeds, the port delivers mono PCM16 samples at
@@ -86,6 +88,9 @@ class AudioOut {
   virtual void abort() = 0;
   virtual bool busy() const = 0;
   virtual void set_volume(uint8_t percent) { (void)percent; }
+  // Bytes of mono PCM16 the playback buffer holds; 0 when unknown. The hello announces it as
+  // caps.speaker.buffer_ms, so the server may send further ahead on a jittery link.
+  virtual size_t buffer_bytes() const { return 0; }
 };
 
 // Decodes compressed speaker audio into mono PCM16. Optional: a device without
@@ -122,6 +127,14 @@ class Storage {
   virtual void erase(std::string_view key) = 0;
 };
 
+// Local calendar time. The port knows the timezone.
+struct WallTime {
+  uint16_t year = 0;
+  uint8_t month = 1, day = 1;  // 1-based
+  uint8_t weekday = 0;         // 0 = Sunday
+  uint8_t hour = 0, minute = 0, second = 0;
+};
+
 class System {
  public:
   virtual ~System() = default;
@@ -135,6 +148,9 @@ class System {
   // battery. The port may let the chip sleep between events; input, the network
   // and the power key still reach the app, only less often (App::kDozeWaitMs).
   virtual void set_dozing(bool dozing) { (void)dozing; }
+  // Local time of day. False until the port knows it (network time or a
+  // battery-backed clock); the clock face stays off until then.
+  virtual bool wall_time(WallTime& out) { (void)out; return false; }
 };
 
 // The slot a firmware update is written to. The core authorizes and checks the
@@ -194,6 +210,7 @@ struct Hal {
   AudioDecoder* speaker_decoder = nullptr;  // optional compressed speaker audio
   Updater* updater = nullptr;
   Power* power = nullptr;
+  Camera* camera = nullptr;  // optional; only camera-capable boards set it
 };
 
 }  // namespace hg

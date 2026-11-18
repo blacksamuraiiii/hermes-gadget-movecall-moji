@@ -1,10 +1,10 @@
+#include <cmath>
 #include <cstring>
 #include <string>
 
 #include "check.hpp"
 #include "hg/canvas.hpp"
 #include "hg/crypto.hpp"
-#include "hg/font.hpp"
 #include "hg/json.hpp"
 #include "hg/protocol.hpp"
 #include "hg/vad.hpp"
@@ -99,6 +99,16 @@ TEST("crypto: base64 round trips every length") {
   CHECK(!hg::crypto::base64_decode("ab$d", out));
 }
 
+TEST("crypto: base64 into a buffer stops at its end") {
+  uint8_t buf[4] = {0, 0, 0, 0xEE};
+  size_t len = 0;
+  CHECK(!hg::crypto::base64_decode("AAECAwQF", buf, 3, len));  // six bytes into three
+  CHECK_EQ(buf[3], uint8_t(0xEE));
+  CHECK(hg::crypto::base64_decode("AAEC", buf, 3, len));
+  CHECK_EQ(len, size_t(3));
+  CHECK(buf[0] == 0 && buf[1] == 1 && buf[2] == 2);
+}
+
 TEST("protocol: identity and auth mac match the host implementation") {
   // Vectors shared with tests/test_protocol.py (computed with Python hashlib/hmac).
   uint8_t key[32];
@@ -129,26 +139,14 @@ TEST("protocol: binary frame header round trips") {
 }
 
 TEST("canvas: word wrap keeps words whole and splits overlong ones") {
-  // Invariants, not fixed splits: the column cost of a glyph follows the build's
-  // fonts, so where a line breaks moves with the face (12 px vs the moji's 22 px),
-  // while the words themselves must survive whole.
   auto lines = hg::wrap_text("the quick brown fox jumps", 10);
-  std::string rebuilt;
-  for (size_t i = 0; i < lines.size(); ++i) {
-    CHECK(hg::font::columns(lines[i]) <= 10);
-    if (i) rebuilt += ' ';
-    rebuilt += lines[i];
-  }
-  CHECK(lines.size() > 1);
-  CHECK_EQ(rebuilt, std::string("the quick brown fox jumps"));
+  CHECK_EQ(lines.size(), size_t(3));
+  CHECK_EQ(lines[0], std::string("the quick"));
+  CHECK_EQ(lines[1], std::string("brown fox"));
+  CHECK_EQ(lines[2], std::string("jumps"));
   auto split = hg::wrap_text("abcdefghijklmno", 6);
-  std::string chars;
-  for (const std::string& line : split) {
-    CHECK(hg::font::columns(line) <= 6);
-    chars += line;
-  }
-  CHECK(split.size() > 1);  // a word longer than the budget splits, never shrinks
-  CHECK_EQ(chars, std::string("abcdefghijklmno"));
+  CHECK_EQ(split.size(), size_t(3));
+  CHECK_EQ(split[2], std::string("mno"));
   auto paras = hg::wrap_text("a\n\nb", 10);
   CHECK_EQ(paras.size(), size_t(3));
   CHECK_EQ(paras[1], std::string());
@@ -169,18 +167,101 @@ TEST("canvas: drawing respects the row clip") {
   CHECK_EQ(lit, 20);
 }
 
+TEST("canvas: a band canvas writes only the rows its framebuffer holds") {
+  // A 10x10 canvas over a buffer that holds rows [4, 7), with a guard row on
+  // either side: every primitive stays inside the rows it holds.
+  constexpr int kBase = 4, kRows = 3;
+  std::vector<uint16_t> px(10 * (kRows + 2), 0x1234);
+  hg::Canvas c(px.data() + 10, 10, 10, false, 0, kBase, kRows);
+  c.fill_rect(0, 0, 10, 10, 0xFFFF);
+  for (int y = 0; y < 10; ++y) c.pixel(y, y, 0x0F0F);
+  const uint8_t bits[1] = {0xFF};
+  for (int y = 0; y < 10; ++y) c.bitmap1(0, y, 8, 1, bits, 0x00F0);
+  c.text(0, 0, "Hermes", 2, 0x0F00);
+  const std::vector<uint16_t> block(10 * 10, 0x0001);
+  c.blit(0, 0, 10, 10, block.data());
+  for (int x = 0; x < 10; ++x) {
+    CHECK_EQ(px[static_cast<size_t>(x)], uint16_t(0x1234));
+    CHECK_EQ(px[static_cast<size_t>((kRows + 1) * 10 + x)], uint16_t(0x1234));
+  }
+  // Row y lands at buffer row y - base, and the row clip still applies.
+  std::vector<uint16_t> band(10 * kRows, 0);
+  hg::Canvas b(band.data(), 10, 10, false, 0, kBase, kRows);
+  b.set_clip_rows(5, 6);
+  b.fill_rect(0, 0, 10, 10, 0xFFFF);
+  b.pixel(3, 6, 0x0F0F);  // held, but outside the clip
+  b.pixel(3, 5, 0x0F0F);
+  for (int y = 0; y < kRows; ++y)
+    for (int x = 0; x < 10; ++x) {
+      const uint16_t want = y + kBase != 5 ? 0 : x == 3 ? 0x0F0F : 0xFFFF;
+      CHECK_EQ(band[static_cast<size_t>(y * 10 + x)], want);
+    }
+}
+
 TEST("vad: speech followed by silence ends the utterance") {
   hg::Vad vad;
   hg::Vad::Config cfg;
   vad.reset(cfg);
   std::vector<int16_t> quiet(320, 20), loud(320);
-  for (size_t i = 0; i < loud.size(); ++i) loud[i] = static_cast<int16_t>((i % 2) ? 6000 : -6000);
+  for (size_t i = 0; i < loud.size(); ++i) loud[i] = static_cast<int16_t>((i / 8) % 2 ? 6000 : -6000);  // 1 kHz
   for (int i = 0; i < 10; ++i) CHECK(vad.feed(quiet.data(), quiet.size()) == hg::Vad::Result::Continue);
   for (int i = 0; i < 25; ++i) vad.feed(loud.data(), loud.size());
   CHECK(vad.heard_speech());
   hg::Vad::Result r = hg::Vad::Result::Continue;
   for (int i = 0; i < 60 && r == hg::Vad::Result::Continue; ++i) r = vad.feed(quiet.data(), quiet.size());
   CHECK(r == hg::Vad::Result::EndOfSpeech);
+}
+
+TEST("vad: a whistle above the voice band is neither speech nor silence broken") {
+  // A StopWatch records a 10.4 kHz tone from its own electronics in bursts, about 300 RMS: as
+  // loud as speech through that microphone, and above its speech floor of 180.
+  const auto tone = [](double hz, double amplitude, std::vector<int16_t>& out, size_t at) {
+    for (size_t i = 0; i < out.size(); ++i)
+      out[i] = static_cast<int16_t>(out[i] + amplitude * std::sin(2 * 3.14159265358979 * hz * double(at + i) / 24000.0));
+  };
+  hg::Vad::Config cfg;
+  cfg.sample_rate = 24000;
+  cfg.min_threshold = 180;
+  cfg.no_speech_ms = 2000;
+  hg::Vad whistle;
+  whistle.reset(cfg);
+  hg::Vad::Result r = hg::Vad::Result::Continue;
+  for (int i = 0; i < 200 && r == hg::Vad::Result::Continue; ++i) {
+    std::vector<int16_t> block(320, 0);
+    tone(10420, 430, block, size_t(i) * 320);
+    r = whistle.feed(block.data(), block.size());
+  }
+  CHECK(r == hg::Vad::Result::NoSpeech);
+  CHECK(!whistle.spoke());
+
+  hg::Vad voice;  // a 300 Hz voice at the same level, with the whistle on top, is still heard
+  voice.reset(cfg);
+  for (int i = 0; i < 40; ++i) {
+    std::vector<int16_t> block(320, 0);
+    tone(300, 430, block, size_t(i) * 320);
+    tone(10420, 430, block, size_t(i) * 320);
+    voice.feed(block.data(), block.size());
+  }
+  CHECK(voice.spoke());
+  r = hg::Vad::Result::Continue;  // ...and the whistle alone afterwards counts as the pause that ends it
+  for (int i = 40; i < 200 && r == hg::Vad::Result::Continue; ++i) {
+    std::vector<int16_t> block(320, 0);
+    tone(10420, 430, block, size_t(i) * 320);
+    r = voice.feed(block.data(), block.size());
+  }
+  CHECK(r == hg::Vad::Result::EndOfSpeech);
+}
+
+TEST("vad: blocks that are not whole milliseconds add up to the time they hold") {
+  hg::Vad vad;
+  hg::Vad::Config cfg;
+  cfg.sample_rate = 24000;
+  vad.reset(cfg);
+  std::vector<int16_t> loud(320);  // 13.33 ms at 24 kHz
+  for (size_t i = 0; i < loud.size(); ++i) loud[i] = static_cast<int16_t>((i / 12) % 2 ? 6000 : -6000);  // 1 kHz
+  for (int i = 0; i < 15; ++i) vad.feed(loud.data(), loud.size());
+  CHECK_EQ(vad.heard_ms(), 200u);  // 195 with each block cut to 13 ms
+  CHECK(vad.spoke());
 }
 
 TEST("vad: silence alone gives up") {

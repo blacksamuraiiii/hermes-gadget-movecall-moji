@@ -220,6 +220,11 @@ class SimulatorWindow:
         self.net_var = tk.BooleanVar(value=self.sim.network_up)
         tk.Checkbutton(row, text="Wi-Fi", variable=self.net_var, selectcolor=BG, activebackground=PANEL,
                        command=lambda: self.sim.set_network(self.net_var.get())).pack(side="right")
+        if self.sim.board.motion:
+            self.face_down_var = tk.BooleanVar(value=self.sim.face_down)
+            tk.Checkbutton(row, text="Face down", variable=self.face_down_var, selectcolor=BG,
+                           activebackground=PANEL,
+                           command=lambda: self.sim.set_face_down(self.face_down_var.get())).pack(side="right")
         sensors = tk.Frame(device, bg=PANEL)
         sensors.pack(fill="x")
         for key, label, low, high, value in [("battery_pct", "Telemetry battery %", 0, 100, self.sim.peripherals.battery),
@@ -561,6 +566,8 @@ class SimulatorWindow:
         self.ready_var.set({"ready":"Ready for your next question.", "listening":"Listening. Release to send.",
                             "thinking":"Waiting for your Hermes...", "responding":"Your Hermes is replying.",
                             "pairing":"Approve the code on the device.", "prompt":"TALK for yes · CANCEL for no.",
+                            "choice":"Pick an answer: click it, or Up/Down then TALK.",
+                            "alarm":"Timer done. Press TALK to stop it.",
                             "error":"Check the device screen for the error."}.get(st.get("screen"), "Connect your Hermes to begin."))
         self.status_var.set(f"{st.get('device_id')}  ·  {st.get('screen')}\n{st.get('server')}")
         self.net_var.set(self.sim.network_up)

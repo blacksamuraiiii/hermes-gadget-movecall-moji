@@ -1,11 +1,13 @@
-// The shared I2C bus, and audio through codec chips: an ES8311 DAC or AW88298
-// speaker amplifier and an ES7210 ADC for the microphones, on one duplex I2S
-// bus (esp_codec_dev does the codec register work).
+// The shared I2C bus, and audio through codec chips: an ES8311 or ES8388 DAC,
+// an AW88298 speaker amplifier, and an ES7210 ADC for the microphones, on one
+// duplex I2S bus (esp_codec_dev does the codec register work).
 #include "port.hpp"  // first: pulls in FreeRTOS.h ahead of task.h/queue.h
 
 #include <cstring>
 
 #include "esp_codec_dev_defaults.h"
+#include "es7243_adc.h"
+#include "es7243e_adc.h"
 #include "driver/gpio.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -73,9 +75,11 @@ bool CodecAudio::begin(const CodecAudioConfig& cfg, i2c_master_bus_handle_t bus)
   if (i2s_new_channel(&chan, &tx_, &rx_) != ESP_OK) return false;
   i2s_std_config_t std_cfg = {};
   std_cfg.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(kRate);  // MCLK = 256 x fs
-  std_cfg.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
-      cfg.stereo32 ? I2S_DATA_BIT_WIDTH_32BIT : I2S_DATA_BIT_WIDTH_16BIT,
-      cfg.stereo32 ? I2S_SLOT_MODE_STEREO : I2S_SLOT_MODE_MONO);
+  // The classic-ESP32 macro compares its arguments without parenthesizing them,
+  // so a ternary passed straight in would bind wrong; name them first.
+  const auto bits = cfg.stereo32 ? I2S_DATA_BIT_WIDTH_32BIT : I2S_DATA_BIT_WIDTH_16BIT;
+  const auto slots = cfg.stereo32 ? I2S_SLOT_MODE_STEREO : I2S_SLOT_MODE_MONO;
+  std_cfg.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(bits, slots);
   std_cfg.gpio_cfg.mclk = static_cast<gpio_num_t>(cfg.mclk);
   std_cfg.gpio_cfg.bclk = static_cast<gpio_num_t>(cfg.bclk);
   std_cfg.gpio_cfg.ws = static_cast<gpio_num_t>(cfg.ws);
@@ -97,7 +101,10 @@ bool CodecAudio::begin(const CodecAudioConfig& cfg, i2c_master_bus_handle_t bus)
 
   audio_codec_i2c_cfg_t dac_i2c = {};
   dac_i2c.port = I2C_NUM_0;
-  dac_i2c.addr = cfg.speaker == SpeakerCodec::Aw88298 ? AW88298_CODEC_DEFAULT_ADDR : ES8311_CODEC_DEFAULT_ADDR;
+  // Address macros are the 8-bit form. The I2C driver shifts them to 7-bit.
+  dac_i2c.addr = cfg.speaker == SpeakerCodec::Aw88298 ? AW88298_CODEC_DEFAULT_ADDR
+               : cfg.speaker == SpeakerCodec::Es8388 ? ES8388_CODEC_DEFAULT_ADDR
+                                                     : ES8311_CODEC_DEFAULT_ADDR;
   dac_i2c.bus_handle = bus;
   es8311_codec_cfg_t dac = {};
   dac.ctrl_if = audio_codec_new_i2c_ctrl(&dac_i2c);
@@ -121,8 +128,25 @@ bool CodecAudio::begin(const CodecAudioConfig& cfg, i2c_master_bus_handle_t bus)
     aw88298_codec_cfg_t amp = {};
     amp.ctrl_if = dac.ctrl_if;
     amp.gpio_if = gpio_if;
-    amp.hw_gain.pa_gain = 15;
+    // No reserve: the driver subtracts the hardware gain from every volume, and 15 dB here (about
+    // 11.4 dB net, with the 3.3 V/5 V default) held 100% near -11 dB. M5Unified runs this
+    // amplifier at 0 dB (HAGCCFG4 0x0064) on the CoreS3. The driver leaves the AW88298's AGC off
+    // (HAGCE=0), so nothing limits the level beyond the volume itself. Checked by ear on a
+    // CoreS3, with no audible distortion at 100 (issue #289).
+    amp.hw_gain.pa_gain = 0;
     out_cfg.codec_if = aw88298_codec_new(&amp);
+  } else if (cfg.speaker == SpeakerCodec::Es8388) {
+    // DAC only. The ES8388 ADC is not the microphone path.
+    es8388_codec_cfg_t es8388 = {};
+    es8388.ctrl_if = dac.ctrl_if;
+    es8388.gpio_if = gpio_if;
+    es8388.codec_mode = ESP_CODEC_DEV_WORK_MODE_DAC;
+    es8388.pa_pin = cfg.speaker_pa ? -1 : static_cast<int16_t>(cfg.pa);
+    es8388.pa_reverted = false;
+    es8388.master_mode = false;
+    es8388.hw_gain.pa_voltage = cfg.amp_supply_v;
+    es8388.hw_gain.codec_dac_voltage = 3.3;
+    out_cfg.codec_if = es8388_codec_new(&es8388);
   } else {
     out_cfg.codec_if = es8311_codec_new(&dac);
   }
@@ -132,14 +156,30 @@ bool CodecAudio::begin(const CodecAudioConfig& cfg, i2c_master_bus_handle_t bus)
   if (!shared) {
     audio_codec_i2c_cfg_t adc_i2c = {};
     adc_i2c.port = I2C_NUM_0;
-    adc_i2c.addr = ES7210_CODEC_DEFAULT_ADDR;
+    // Seeed's Watcher BSP probes the older ES7243 at 0x13 before its ES7243E: units carry either.
+    constexpr uint8_t kEs7243Addr = 0x13;
+    es7243_fitted_ = cfg.mic == MicCodec::Es7243e && i2c_master_probe(bus, cfg.mic_addr, 50) != ESP_OK &&
+                     i2c_master_probe(bus, kEs7243Addr, 50) == ESP_OK;
+    // esp_codec_dev takes the 8-bit address form; mic_addr is the 7-bit one.
+    adc_i2c.addr = cfg.mic != MicCodec::Es7243e ? ES7210_CODEC_DEFAULT_ADDR
+                 : static_cast<uint8_t>((es7243_fitted_ ? kEs7243Addr : cfg.mic_addr) << 1);
     adc_i2c.bus_handle = bus;
-    es7210_codec_cfg_t adc = {};
-    adc.ctrl_if = audio_codec_new_i2c_ctrl(&adc_i2c);
-    adc.mic_selected = cfg.es7210_mics;
     esp_codec_dev_cfg_t in_cfg = {};
     in_cfg.dev_type = ESP_CODEC_DEV_TYPE_IN;
-    in_cfg.codec_if = es7210_codec_new(&adc);
+    if (es7243_fitted_) {
+      es7243_codec_cfg_t adc = {};
+      adc.ctrl_if = audio_codec_new_i2c_ctrl(&adc_i2c);
+      in_cfg.codec_if = es7243_codec_new(&adc);
+    } else if (cfg.mic == MicCodec::Es7243e) {
+      es7243e_codec_cfg_t adc = {};
+      adc.ctrl_if = audio_codec_new_i2c_ctrl(&adc_i2c);
+      in_cfg.codec_if = es7243e_codec_new(&adc);
+    } else {
+      es7210_codec_cfg_t adc = {};
+      adc.ctrl_if = audio_codec_new_i2c_ctrl(&adc_i2c);
+      adc.mic_selected = cfg.es7210_mics;
+      in_cfg.codec_if = es7210_codec_new(&adc);
+    }
     in_cfg.data_if = data_if;
     in_ = in_cfg.codec_if ? esp_codec_dev_new(&in_cfg) : nullptr;
   }
@@ -149,17 +189,33 @@ bool CodecAudio::begin(const CodecAudioConfig& cfg, i2c_master_bus_handle_t bus)
   fs.sample_rate = kRate;
   fs.channel = cfg.stereo32 ? 2 : 1;
   fs.bits_per_sample = cfg.stereo32 ? 32 : 16;
+  // esp_codec_dev turns a 1-channel open into "2 channels, keep channel 0" and sets the
+  // I2S slot mask from that, so the right slot has to be asked for the same way: two
+  // channels, keep channel 1. The I2S channel then reads mono samples from the right slot.
+  esp_codec_dev_sample_info_t in_fs = fs;
+  if (cfg.mic_right_slot && !cfg.stereo32) {
+    in_fs.channel = 2;
+    in_fs.channel_mask = ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1);
+  }
   if (out_ && esp_codec_dev_open(out_, &fs) != ESP_CODEC_DEV_OK) out_ = nullptr;
   if (shared) in_ = out_;  // one handle, opened once
-  else if (in_ && esp_codec_dev_open(in_, &fs) != ESP_CODEC_DEV_OK) in_ = nullptr;
+  else if (in_ && esp_codec_dev_open(in_, &in_fs) != ESP_CODEC_DEV_OK) in_ = nullptr;
   if (out_) {
     esp_codec_dev_set_out_vol(out_, 70);
     esp_codec_dev_set_out_mute(out_, true);  // unmuted while something plays
+    // A board that asks for it: the ES8311's DAC ramps volume on mute/unmute (reg 0x37, ramp
+    // rate in bits 4-7). Another speaker codec has some other register there.
+    if (cfg.dac_fade_ramp && cfg.speaker == SpeakerCodec::Es8311) esp_codec_dev_write_reg(out_, 0x37, 0x38);
   }
   if (in_) esp_codec_dev_set_in_gain(in_, cfg.mic_gain_db);
-  mic_link_ = {in_ && in_ != out_, rx_, fs, cfg.mic_gain_db};
+  mic_link_ = {in_ && in_ != out_, rx_, shared ? fs : in_fs, cfg.mic_gain_db};
+  out_format_ = fs;
+  mic_name_ = shared                         ? "es8311"
+              : es7243_fitted_               ? "es7243"
+              : cfg.mic == MicCodec::Es7243e ? "es7243e"
+                                             : "es7210";
   ESP_LOGI(TAG, "codecs: speaker %s, microphones %s (%s)", out_ ? "ready" : "missing", in_ ? "ready" : "missing",
-           shared ? "es8311 analog" : "es7210");
+           shared ? "es8311 analog" : mic_name_);
   return out_ || in_;
 }
 
@@ -181,7 +237,6 @@ bool CodecMic::begin(esp_codec_dev_handle_t dev, bool rmnm, const CodecAudio::Mi
 
 bool CodecMic::start(uint32_t sample_rate) {
   if (!dev_) return false;
-  ESP_LOGI(TAG, "mic: start asked for %u Hz", static_cast<unsigned>(sample_rate));
   if (sample_rate != CodecAudio::kRate) {
     ESP_LOGW(TAG, "microphone runs at %u Hz only", static_cast<unsigned>(CodecAudio::kRate));
     return false;
@@ -218,36 +273,11 @@ void CodecMic::task(void* arg) {
     bool read(int16_t* chunk) {
       void* data = mic->rmnm_ ? static_cast<void*>(mic->raw_) : static_cast<void*>(chunk);
       const size_t bytes = mic->rmnm_ ? kMicChunk * 4 * sizeof(int16_t) : kMicChunk * sizeof(int16_t);
-      if (esp_codec_dev_read(mic->dev_, data, bytes) != ESP_CODEC_DEV_OK) {
-        if (++mic->dbg_fails_ % 50 == 1)
-          ESP_LOGW(TAG, "mic read failed (%u so far)", static_cast<unsigned>(mic->dbg_fails_));
-        return false;
-      }
+      if (esp_codec_dev_read(mic->dev_, data, bytes) != ESP_CODEC_DEV_OK) return false;
       if (mic->rmnm_) hg::ws185_mono(mic->raw_, chunk, kMicChunk);
       return true;
     }
-    void deliver(const int16_t* chunk) {
-      // Bring-up only: the ADC handed back zeros for the first seconds of a turn opened by the
-      // wake word. Kept behind HG_WAKE_DIAG so a release image carries no per-chunk logging.
-#if defined(HG_WAKE_DIAG)
-      if (++mic->dbg_chunks_ % 100 == 0) {
-        int peak = 0;
-        for (size_t i = 0; i < kMicChunk; ++i) {
-          const int v = chunk[i] < 0 ? -chunk[i] : chunk[i];
-          if (v > peak) peak = v;
-        }
-        ESP_LOGI(TAG, "mic: peak %d, capturing %d", peak, static_cast<int>(mic->capturing_.load()));
-      }
-#endif
-      if (MicTap tap = mic_tap()) {
-        // The wake engine holds the microphone only while the app is idle, where it drops Mic
-        // events anyway. Posting them would allocate and copy a chunk 100 times a second into a
-        // 96-deep queue that real audio and control events need.
-        tap(chunk, kMicChunk);
-        return;
-      }
-      events::post(EventType::Mic, chunk, kMicChunk * sizeof(int16_t));
-    }
+    void deliver(const int16_t* chunk) { events::post(EventType::Mic, chunk, kMicChunk * sizeof(int16_t)); }
     void wait() { ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000)); }
     void pause() { vTaskDelay(pdMS_TO_TICKS(10)); }
   } ops{self};
@@ -266,12 +296,16 @@ bool CodecSpeaker::begin(esp_codec_dev_handle_t dev, bool stereo32, int pa) {
   if (storage) buffer_ = xStreamBufferCreateStatic(kSpeakerBuffer, 1, storage, &control);
   else buffer_ = xStreamBufferCreate(16 * 1024, 1);
   if (!buffer_) return false;
+  capacity_ = storage ? kSpeakerBuffer : 16 * 1024;
   stereo32_ = stereo32;
   if (pa >= 0) {
     const auto pin = static_cast<gpio_num_t>(pa);
     pa_.emplace([this](void* chunk, size_t bytes) { return xStreamBufferReceive(buffer_, chunk, bytes, 0); },
                 [this] { xStreamBufferReset(buffer_); },
                 [pin](bool on) { gpio_set_level(pin, on); });
+  } else if (board_pa) {
+    pa_.emplace([this](void* chunk, size_t bytes) { return xStreamBufferReceive(buffer_, chunk, bytes, 0); },
+                [this] { xStreamBufferReset(buffer_); }, board_pa);
   }
   if (stereo32) {
     stereo_ = static_cast<int32_t*>(heap_caps_malloc(kSpeakerChunk * 2 * sizeof(int32_t), MALLOC_CAP_8BIT));
@@ -296,6 +330,7 @@ void CodecSpeaker::power_up() {
   }
   esp_codec_dev_set_out_vol(dev_, volume_);
   esp_codec_dev_set_out_mute(dev_, true);  // unmuted while something plays
+  if (es8311_fade_ramp) esp_codec_dev_write_reg(dev_, 0x37, 0x38);  // reopening reset it (CodecAudio::begin)
   powered_ = true;
 }
 
@@ -422,6 +457,7 @@ void CodecSpeaker::task(void* arg) {
           }
         }
         esp_codec_dev_set_out_mute(self->dev_, true);
+        if (pa) vTaskDelay(pdMS_TO_TICKS(20));  // DAC decays to silence before PA off
         self->draining_ = false;  // busy() stays true until the tail is played and muted
         if (errs) ESP_LOGW(TAG, "spk tail drain: %d/3 writes failed (rc of first=%d), tail may clip", errs, first_rc);
         if (pa) pa->disable();
@@ -455,11 +491,15 @@ void CodecSpeaker::task(void* arg) {
     }
     gaps.resumed(speaker_now_ms());
     if (!playing) {
+      if (pa) {
+        if (!pa->enable(generation)) continue;
+        vTaskDelay(pdMS_TO_TICKS(20));  // PA settles while the DAC is still muted
+      }
       esp_codec_dev_set_out_mute(self->dev_, false);
       playing = true;
+    } else if (pa && !pa->enable(generation)) {
+      continue;  // a chunk taken before an abort(): drop it rather than play it
     }
-    // Drop a chunk taken before an abort() rather than replay it.
-    if (pa && !pa->enable(generation)) continue;
     if (stream_t0 == 0) stream_t0 = esp_timer_get_time() / 1000;  // the stream-end log's clock starts at the first frame played
     if (self->stereo32_) {
       const size_t frames = got / sizeof(int16_t);

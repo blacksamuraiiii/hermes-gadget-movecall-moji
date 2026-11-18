@@ -2,10 +2,24 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdlib>
+#include <memory>
+#include <string>
+#include <string_view>
 
 namespace hg::mascot {
 
-enum class Frame : uint8_t { Idle, Blink, Talk, Happy, Sad };
+enum class Frame : uint8_t { Idle, Blink, Talk };
+
+// What Hermes puts on the face with the face.set action (docs/protocol.md#the-faceset-action).
+// The renderer draws each one from the three frames and a small mark beside the head, so a
+// custom face and a colour face show them too.
+enum class Expression : uint8_t { Neutral, Happy, Confused, Alert, Sleepy };
+constexpr Expression kExpressions[] = {Expression::Neutral, Expression::Happy, Expression::Confused,
+                                       Expression::Alert, Expression::Sleepy};
+const char* expression_name(Expression e);
+// False, leaving `out` alone, when `name` is none of the names above.
+bool parse_expression(std::string_view name, Expression& out);
 
 // Square, row-major, MSB-first, rows padded to whole bytes. A set bit is ink
 // (the white artwork); clear bits are transparent.
@@ -36,5 +50,44 @@ struct Anchors {
   int16_t mouth_y0, mouth_y1;  // rows that change when talking
 };
 const Anchors& anchors();
+
+// The rows of a colour face that its blink or talk frame changes: `rows` rows of px pixels from row `y`,
+// drawn over the idle picture's. rows 0: the face has no such frame and stays still.
+struct Band {
+  const uint16_t* rgb565 = nullptr;
+  uint16_t y = 0, rows = 0;
+};
+
+// A face Hermes sent for the profile that answers (docs/protocol.md#faces). A one-colour face has the
+// mascot's sizes and frames; a colour face is a px*px picture, with the bands its blink and talk change.
+// It replaces the mascot while the app holds one.
+struct Face {
+  struct Free {
+    void operator()(void* p) const { std::free(p); }
+  };
+  std::string hash;
+  std::unique_ptr<uint8_t, Free> bits;  // one colour: every size, smallest first, each as idle, blink, talk
+  const uint16_t* rgb565 = nullptr;     // colour: px*px, row-major, 0x0000 transparent; the app owns it
+  uint16_t px = 0;
+  Band blink, talk;  // colour only
+  Anchors anchors;
+
+  // The band `frame` lays over a colour face's picture; no rows for the idle frame.
+  const Band& band(Frame frame) const {
+    static const Band none;
+    return frame == Frame::Blink ? blink : frame == Frame::Talk ? talk : none;
+  }
+};
+// The face message's `bits`: base64 of the bitmaps, then of the anchors as ten little-endian int16
+// in Anchors' field order. False, before allocating anything, when the length is not exactly that;
+// false when there is no memory for it, and when an anchor is outside 0..1000 or a row range is
+// upside down.
+bool parse(std::string_view base64, Face& out);
+// Anchors from ten values in Anchors' field order; false under the same rules as parse().
+bool make_anchors(const int64_t (&v)[10], Anchors& out);
+// pick() and anchors() for `face`, or for the mascot when it is null. A colour face picks the
+// mascot's size and bits: Ui draws its pixels instead.
+Bitmap pick(int max_size, Frame frame, const Face* face);
+const Anchors& anchors(const Face* face);
 
 }  // namespace hg::mascot

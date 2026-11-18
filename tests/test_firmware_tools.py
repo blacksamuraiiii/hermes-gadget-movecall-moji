@@ -220,6 +220,29 @@ def test_release_image_puts_every_part_at_its_address(project, tmp_path):
     assert f"{hashlib.sha256(app).hexdigest()}  hermes-gadget-amoled-0.2.0-app.bin" in sums
 
 
+def test_release_never_writes_a_factory_partition(project, tmp_path):
+    # partitions-sensecap-watcher.csv: Seeed's nvsfactory first, then the firmware's own nvs.
+    layout = [(0x01, 0x02, "nvsfactory", 0x9000, 0x32000), (0x01, 0x02, "nvs", 0x3B000, 0x6000),
+              (0x01, 0x00, "otadata", 0x41000, 0x2000), (0x01, 0x01, "phy_init", 0x43000, 0x1000),
+              (0x00, 0x10, "ota_0", 0x60000, 0x1F0000), (0x00, 0x11, "ota_1", 0x250000, 0x1F0000)]
+    out_dir = project("watcher", flash="32MB", meta={"title": "Watcher"})
+    (out_dir / "partitions.bin").write_bytes(_partition_table(layout))
+    dist = tmp_path / "dist"
+    assert _package(project, "--board", "watcher", "--out", str(dist), "--notes", str(tmp_path / "notes.md")) == 0
+
+    build = json.loads((dist / "manifest.json").read_text(encoding="utf-8"))["builds"][0]
+    assert build["settings"] == {"offset": 0x3B000, "size": 0x6000}  # the firmware's nvs, not the factory one
+    assert build["keep"] == [{"offset": 0x9000, "size": 0x32000}]
+    assert "Don't write the full image of Watcher with esptool" in (tmp_path / "notes.md").read_text(encoding="utf-8")
+
+
+def test_release_lists_no_factory_partition_for_an_ordinary_table(project, tmp_path):
+    project("amoled", meta={"title": "Round AMOLED"})
+    dist = tmp_path / "dist"
+    assert _package(project, "--board", "amoled", "--out", str(dist)) == 0
+    assert "keep" not in json.loads((dist / "manifest.json").read_text(encoding="utf-8"))["builds"][0]
+
+
 def test_esp32p4_image_has_its_bootloader_at_0x2000(project, tmp_path, monkeypatch):
     """The ESP32-P4's ROM loads the bootloader from 0x2000; one written at 0 doesn't boot."""
     monkeypatch.setattr(package_release, "IDF_BOARDS", {"p4": "a test"})
@@ -282,6 +305,19 @@ def test_idf_build_is_staged_and_packaged_like_a_platformio_one(project, tmp_pat
     assert [b["board"] for b in manifest["builds"]] == ["breadboard", "p4"]
     with zipfile.ZipFile(dist / manifest["licenses"]["path"]) as archive:
         assert archive.read("p4/components/example__dsi/LICENSE") == b"DSI driver license\n"
+
+
+def test_staging_a_build_without_an_elf_removes_the_previous_one(tmp_path, monkeypatch):
+    monkeypatch.setattr(stage_idf_build, "IDF_BOARDS", {"p4": "a test"})
+    build = _idf_build(tmp_path / "idf-build")
+    project = tmp_path / "esp32"
+    (build / "hermes_gadget.elf").write_bytes(b"ELF first build")
+    assert stage_idf_build.main(["p4", str(build), "--project", str(project)]) == 0
+    staged = project / ".pio" / "build" / "p4" / "firmware.elf"
+    assert staged.read_bytes() == b"ELF first build"
+    (build / "hermes_gadget.elf").unlink()
+    assert stage_idf_build.main(["p4", str(build), "--project", str(project)]) == 0
+    assert not staged.exists()
 
 
 def test_staging_refuses_a_bootloader_offset_the_packager_disagrees_with(tmp_path, monkeypatch, capsys):
@@ -370,6 +406,23 @@ def test_every_board_trusts_a_chain_at_any_bundled_root():
             if path.exists():
                 settings.update((symbol, value) for _, symbol, value in check_config.parse(path))
         assert {k: settings.get(k) for k in want} == want, board
+
+
+def test_every_board_with_psram_has_the_network_buffers():
+    """lwIP's 5,760-byte TCP window holds a connection below 24 kHz microphone audio on a slow
+    link (a phone hotspot), and recordings lose frames; every PSRAM board sets 32 KB windows with
+    the buffers in PSRAM (docs/porting.md#network-buffers). A new board copies them (#227)."""
+    want = {"CONFIG_LWIP_TCP_WND_DEFAULT": "32768", "CONFIG_LWIP_TCP_SND_BUF_DEFAULT": "32768",
+            "CONFIG_LWIP_TCP_RECVMBOX_SIZE": "32", "CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP": "y"}
+    boards = sorted((package_release.PROJECT_DIR / "boards").glob("*/sdkconfig.defaults"))
+    checked = 0
+    for path in boards:
+        settings = {symbol: value for _, symbol, value in check_config.parse(path)}
+        if settings.get("CONFIG_SPIRAM") != "y":
+            continue
+        checked += 1
+        assert {k: settings.get(k) for k in want} == want, path.parent.name
+    assert checked > 20
 
 
 def test_release_notes_pin_the_plugin_to_the_release_commit(project, tmp_path):

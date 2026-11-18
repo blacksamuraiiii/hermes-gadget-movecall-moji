@@ -37,13 +37,6 @@ i2s_std_config_t std_config(uint32_t rate, i2s_data_bit_width_t bits, int bclk, 
 
 uint32_t speaker_now_ms() { return static_cast<uint32_t>(esp_timer_get_time() / 1000); }
 
-namespace {
-std::atomic<MicTap> mic_tap_slot{nullptr};
-}  // namespace
-
-void set_mic_tap(MicTap tap) { mic_tap_slot.store(tap); }
-MicTap mic_tap() { return mic_tap_slot.load(); }
-
 void log_underruns(const char* tag, const hg::SpeakerUnderruns::Totals& t) {
   ESP_LOGI(tag, "playback ended: %u underruns, %u ms in total, longest %u ms", static_cast<unsigned>(t.count),
            static_cast<unsigned>(t.total_ms), static_cast<unsigned>(t.longest_ms));
@@ -69,9 +62,10 @@ bool I2sMic::begin(const I2sMicConfig& cfg) {
     if (i2s_channel_init_pdm_rx_mode(rx_, &pdm_cfg) != ESP_OK) return false;
     pdm_ = true;
   } else {
-    // INMP441 outputs 24-bit samples in a 32-bit left slot.
+    // 24-bit samples in a 32-bit slot. INMP441 uses the left slot.
+    // right selects the other slot (MSM261 with L/R tied high).
     i2s_std_config_t std_cfg = std_config(rate_, I2S_DATA_BIT_WIDTH_32BIT, cfg.sck, cfg.ws, -1, cfg.sd);
-    std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
+    std_cfg.slot_cfg.slot_mask = cfg.right ? I2S_STD_SLOT_RIGHT : I2S_STD_SLOT_LEFT;
     if (i2s_channel_init_std_mode(rx_, &std_cfg) != ESP_OK) return false;
   }
   xTaskCreate(&I2sMic::task, "hg-mic", 4096, this, 6, nullptr);
@@ -116,10 +110,7 @@ void I2sMic::task(void* arg) {
       for (size_t i = 0; i < n; ++i) {
         pcm[i] = static_cast<int16_t>(std::max<int32_t>(-32768, std::min<int32_t>(32767, pcm[i] * 4)));
       }
-      if (self->capturing_) {
-        if (MicTap tap = mic_tap()) tap(pcm, n);  // the wake engine, when it holds the mic
-        events::post(EventType::Mic, pcm, n * sizeof(int16_t));
-      }
+      if (self->capturing_) events::post(EventType::Mic, pcm, n * sizeof(int16_t));
       continue;
     }
     int32_t raw[kMicChunk];
@@ -133,10 +124,7 @@ void I2sMic::task(void* arg) {
       int32_t s = raw[i] >> 13;
       pcm[i] = static_cast<int16_t>(std::max<int32_t>(-32768, std::min<int32_t>(32767, s)));
     }
-    if (self->capturing_) {
-      if (MicTap tap = mic_tap()) tap(pcm, n);  // the wake engine, when it holds the mic
-      events::post(EventType::Mic, pcm, n * sizeof(int16_t));
-    }
+    if (self->capturing_) events::post(EventType::Mic, pcm, n * sizeof(int16_t));
   }
 }
 
@@ -154,6 +142,7 @@ bool I2sSpeaker::begin(const I2sSpeakerConfig& cfg) {
   if (storage) buffer_ = xStreamBufferCreateStatic(kSpeakerBuffer, 1, storage, &control);
   else buffer_ = xStreamBufferCreate(16 * 1024, 1);
   if (!buffer_) return false;
+  capacity_ = storage ? kSpeakerBuffer : 16 * 1024;
   xTaskCreate(&I2sSpeaker::task, "hg-spk", 4096, this, 7, nullptr);
   ESP_LOGI(TAG, "speaker ready");
   return true;

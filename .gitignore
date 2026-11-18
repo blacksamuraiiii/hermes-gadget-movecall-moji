@@ -6,17 +6,24 @@ __pycache__/
 venv/
 .pytest_cache/
 dist/
+# The dashboard tab's bundle ships with the plugin (built from plugin/dashboard/src).
+!plugin/dashboard/dist/
 build/
 
 # Host (CMake) builds
 /build/
-/build-*/
+
+# The Desktop page's build tools (its bundle, plugin/desktop/plugin.js, ships with the plugin)
+plugin/desktop-src/node_modules/
 
 # Installer site
 site/node_modules/
 site/_site/
 site/test-results/
 site/playwright-report/
+
+# Factory flash dumps taken before a board is overwritten.
+backup/
 
 # ESP-IDF / PlatformIO outputs
 firmware/esp32/build/
@@ -35,14 +42,9 @@ firmware/esp32/sdkconfig.*-*
 .DS_Store
 Thumbs.db
 
-# Local runtime output: relay logs carry this machine's device id and paths,
-# .workbuddy is a local scratch/memory directory, not part of the project.
-tools/*.log
-.workbuddy/
+# Host build trees at the repo root (CMake -B build-emoji / build-host)
+/build-emoji/
+/build-host/
 
-# Release images live in GitHub Releases, not in git: a 1.4 MB image per version
-# in history is what this rule exists to stop. Keep README.md and SHA256SUMS here.
-firmware/releases/*/*.bin
-
-# Local reference material (datasheets, vendor drops), not part of the project.
-refs/
+# Relay logs written next to the tool
+tools/relay*.log

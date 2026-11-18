@@ -1,5 +1,3 @@
-> 本 fork 改动与用法详见中文说明：[README_zh.md](README_zh.md)
-
 <p align="center">
   <img src="docs/images/logo.png" width="64" alt="Hermes Gadget logo">
 </p>
@@ -10,8 +8,6 @@
   <b>Hold a button. Ask Hermes. Hear the answer.</b><br>
   A small device for your own <a href="https://github.com/NousResearch/hermes-agent">Hermes Agent</a>, with its tools, memory, and skills.
 </p>
-
-
 
 <p align="center">
   <a href="https://adolanium.github.io/hermes-gadget-sdk/installer.html"><b>Set up a board</b></a> ·
@@ -82,6 +78,7 @@ These images show the simulator's device display. The [simulator guide](docs/sim
 | Use a gadget | Build with the SDK |
 |---|---|
 | [Choose a starting point](docs/getting-started.md) | [Development and tests](docs/development.md) |
+| [See every feature and board](docs/features.md) | |
 | [Set up a board](docs/setup-board.md) | [Add a board, actions, or sensors](docs/porting.md) |
 | [Try the simulator](docs/desktop.md) | [Customize the face](docs/faces.md) |
 | [Run a Linux gadget](docs/linux.md) | [Hardware verification](docs/hardware-validation.md) |
@@ -90,6 +87,7 @@ These images show the simulator's device display. The [simulator guide](docs/sim
 | [Talk, type, and interrupt](docs/using-gadget.md) | [Protocol](docs/protocol.md) |
 | [Change Wi-Fi or update firmware](docs/setup-board.md#manage-an-existing-gadget) | [Hermes integration reference](docs/hermes-integration.md) |
 | [Remote access with Tailscale Funnel](docs/tailscale-funnel.md) | |
+| [Reach Hermes over your tailnet](docs/tailnet.md) | Experimental |
 | [Troubleshooting](docs/troubleshooting.md) | [Hardware and wiring](docs/hardware.md) |
 
 ## Project status
@@ -106,6 +104,7 @@ The [Home Assistant and MQTT examples](docs/home-automation.md) expose a configu
 
 [![CI](https://github.com/Adolanium/hermes-gadget-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/Adolanium/hermes-gadget-sdk/actions/workflows/ci.yml)
 [![Hermes integration](https://github.com/Adolanium/hermes-gadget-sdk/actions/workflows/hermes.yml/badge.svg)](https://github.com/Adolanium/hermes-gadget-sdk/actions/workflows/hermes.yml)
+[![Greptile: The War on Bugs](https://www.greptile.com/badge.svg)](https://www.greptile.com/?utm_source=oss_badge&utm_medium=readme&utm_campaign=greptile_for_open_source)
 
 ## Contributing
 

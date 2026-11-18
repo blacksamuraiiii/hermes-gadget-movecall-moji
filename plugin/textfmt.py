@@ -1,9 +1,11 @@
 """Turn chat-flavoured agent text into something a tiny screen can show.
 
-Devices render a small bitmap font (ASCII only on the reference firmware), so
-the server strips Markdown, folds typographic punctuation and accents to
-ASCII, and drops emoji. Doing it here keeps the firmware simple and lets every
-board benefit from improvements without a reflash.
+Devices render a small bitmap font, so the server strips Markdown, folds
+typographic punctuation, folds accents to what the device's ``charset`` draws
+(``ascii``; ``latin1`` on firmware whose font has Latin-1; ``cjk`` on firmware built
+with the Chinese font, which draws Latin-1 plus CJK), and drops emoji.
+Doing it here keeps the firmware simple and lets every board benefit from
+improvements without a reflash.
 """
 
 from __future__ import annotations
@@ -23,9 +25,6 @@ _PUNCT = {
     "\u0153": "oe", "\u0152": "OE", "\xf8": "o", "\xd8": "O", "\u0142": "l", "\u0141": "L",
 }
 
-# The CJK font draws ° and °C reads as 摄氏度, so the ASCII " deg" fold is for ascii-only boards.
-_CJK_PUNCT = {k: v for k, v in _PUNCT.items() if k != "\xb0"}
-
 _FENCE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
 _INLINE_CODE = re.compile(r"`([^`]*)`")
 _LINK = re.compile(r"!?\[([^\]]*)\]\(([^)]*)\)")
@@ -37,51 +36,11 @@ _BULLET = re.compile(r"^(\s*)[-*+]\s+", re.MULTILINE)
 _RULE = re.compile(r"^\s*([-*_])(\s*\1){2,}\s*$", re.MULTILINE)
 _TABLE_SEP = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$", re.MULTILINE)
 _THINK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
-# Raw tool-call markers a model emits as TEXT when the profile has no such tool
-# ("<｜｜DSML｜｜ calls> ... </｜｜DSML｜｜ calls>": the tokenizer's <|tool▁calls|> arrives with
-# fullwidth bars). Both glyphs are drawable, so without this they reach the screen
-# and get read aloud. Strip the whole block first, then a truncated open block, then
-# any leftover marker fragment.
-_BAR = r"[|\uff5c]{1,2}"
-_TOKEN_NAME = r"[A-Za-z0-9_\u2581 ]{1,24}"
-_TOOL_BLOCK = re.compile(
-    rf"<{_BAR}{_TOKEN_NAME}{_BAR}.*</{_BAR}{_TOKEN_NAME}{_BAR}[^<>\n]*>",
-    re.DOTALL)
-_TOOL_OPEN_TAIL = re.compile(
-    rf"</?{_BAR}{_TOKEN_NAME}{_BAR}[^<>\n]*>.*\Z", re.DOTALL)
-_TOOL_TOKEN = re.compile(rf"</?{_BAR}{_TOKEN_NAME}{_BAR}[^<>\n]*>")
-# What a half-stripped call leaves behind from a nested marker: `name="terminal"`,
-# `parameter string="true">true`. Only consulted when markers were actually present.
-_TOOL_RESIDUE = re.compile(r"\b(?:name|parameter|invoke|arguments|string)\s*=", re.IGNORECASE)
 _BLANKS = re.compile(r"\n{3,}")
 _SPACES = re.compile(r"[ \t]{2,}")
 
 
-def strip_tool_tokens(text: str) -> str:
-    """Drop raw tool-call markers (and the block they wrap) from model output.
-
-    A profile without the tool the model wants still gets the model's best attempt at
-    calling it, as plain text: ``<｜｜DSML｜｜ calls>...``. Nothing downstream can draw or
-    speak that, so remove it here — the same helper serves the screen path
-    (:func:`for_device`) and the spoken-reply path in the adapter.
-
-    Nested markers leave parameter fragments behind after the marker pass
-    (``… parameter string="true">true</…parameter>``), so once markers were present the
-    remaining text is cut at the first call-parameter fragment.
-    """
-    if not text or ("<|" not in text and "<\uff5c" not in text):
-        return text
-    text = _TOOL_BLOCK.sub("", text)
-    text = _TOOL_OPEN_TAIL.sub("", text)
-    text = _TOOL_TOKEN.sub("", text)
-    residue = _TOOL_RESIDUE.search(text)
-    if residue:
-        text = text[:residue.start()]
-    return text
-
-
 def strip_markdown(text: str) -> str:
-    text = strip_tool_tokens(text)
     text = _THINK.sub("", text)
     text = _FENCE.sub(lambda m: m.group(1).rstrip("\n"), text)
     text = _INLINE_CODE.sub(r"\1", text)
@@ -141,71 +100,132 @@ def fold_latin1(text: str) -> str:
     return "".join(out)
 
 
-def _drawable(ch: str) -> bool:
-    """True when the device's font can draw this character.
+def _is_ru(ch: str) -> bool:
+    return "\u0410" <= ch <= "\u044f" or ch in "\u0401\u0451"
 
-    The firmware carries ASCII plus the GB2312 level-1 hanzi (its CJK table is
-    generated from that range by tools/make_cjk_font.py), so anything GB2312
-    cannot encode - emoji, box drawing, rare hanzi - would come out as '?'.
-    """
-    if ch == "\n" or " " <= ch <= "~":
-        return True
-    try:
-        ch.encode("gb2312")
-    except UnicodeEncodeError:
-        return False
-    return True
+
+_RU_COMPOSITIONS = (
+    ("\u0438\u0306", "\u0439"),  # и + combining breve -> й
+    ("\u0418\u0306", "\u0419"),  # И + combining breve -> Й
+    ("\u0435\u0308", "\u0451"),  # е + combining diaeresis -> ё
+    ("\u0415\u0308", "\u0401"),  # Е + combining diaeresis -> Ё
+)
+
+
+def fold_latin1_cyrillic(text: str) -> str:
+    """For a device whose font draws Latin-1 and Russian Cyrillic (U+0410..U+044F, Ё/ё)."""
+    # й and ё may arrive as и/е plus a combining mark; the mark alone would be folded away by
+    # fold_latin1, leaving the wrong letter. Compose just those, so Latin text folds exactly as
+    # it does for "latin1".
+    for decomposed, composed in _RU_COMPOSITIONS:
+        text = text.replace(decomposed, composed)
+    out, run = [], []
+    for ch in text:
+        if _is_ru(ch):
+            if run:
+                out.append(fold_latin1("".join(run)))
+                run = []
+            out.append(ch)
+        else:
+            run.append(ch)
+    if run:
+        out.append(fold_latin1("".join(run)))
+    return "".join(out)
+
+
+def _is_wide(ch: str) -> bool:
+    """CJK, kana, hangul and fullwidth forms: the characters the CJK font draws two columns wide."""
+    o = ord(ch)
+    return (0x2E80 <= o <= 0xA4CF or 0xAC00 <= o <= 0xD7A3 or 0xF900 <= o <= 0xFAFF
+            or 0xFE30 <= o <= 0xFE4F or 0xFF00 <= o <= 0xFF60 or 0xFFE0 <= o <= 0xFFE6
+            or 0x20000 <= o <= 0x3FFFD)
+
+
+def fold_cjk(text: str) -> str:
+    """For a device whose font draws Latin-1 and CJK: keep wide characters, fold the rest like Latin-1."""
+    out = []
+    run = []
+    for ch in text:
+        if _is_wide(ch):
+            if run:
+                out.append(fold_latin1("".join(run)))
+                run = []
+            out.append(ch)
+        else:
+            run.append(ch)
+    if run:
+        out.append(fold_latin1("".join(run)))
+    return "".join(out)
+
+
+def _columns(text: str) -> int:
+    return sum(2 if _is_wide(ch) else 1 for ch in text)
+
+
+def _cut(word: str, cols: int) -> int:
+    """How many characters of ``word`` fit ``cols`` columns: one at least."""
+    used = 0
+    for n, ch in enumerate(word):
+        used += 2 if _is_wide(ch) else 1
+        if used > cols:
+            return max(1, n)
+    return len(word)
+
+
+def wrap(text: str, cols: int) -> list[str]:
+    """The lines the device breaks one line of text into (the firmware's ``wrap_text``): words
+    joined by a space while they fit, a word longer than the line cut at its width."""
+    lines: list[str] = []
+    current = ""
+    for word in text.split():
+        while _columns(word) > cols:
+            if current:
+                lines.append(current)
+                current = ""
+            n = _cut(word, cols)
+            lines.append(word[:n])
+            word = word[n:]
+        if not word:
+            continue
+        if current and _columns(current) + 1 + _columns(word) > cols:
+            lines.append(current)
+            current = word
+        else:
+            current = f"{current} {word}" if current else word
+    if current:
+        lines.append(current)
+    return lines
+
+
+def clip(text: str, cols: int, lines: int) -> tuple[str, bool]:
+    """``text`` as it fits ``lines`` lines of ``cols`` columns on the device, and whether it was
+    cut. A cut text ends in "..." and still fits."""
+    if len(wrap(text, cols)) <= lines:
+        return text, False
+    kept = " ".join(wrap(text, cols)[:lines])
+    while kept and len(wrap(kept + "...", cols)) > lines:
+        kept = kept[:-1].rstrip()
+    return kept + "...", True
+
+
+def line(text: str, charset: str = "ascii", cols: int | None = None) -> str:
+    """One row of a list (a card's item, a choice's answer): shaped like ``for_device``, on one
+    line, and no longer than the device's line when it reports ``text_cols``."""
+    text = " ".join(for_device(text, charset).split())
+    # By columns, as the device counts them: a wide character takes two, and what the device cut
+    # further would be cut unseen by the agent.
+    return text[:_cut(text, cols)] if isinstance(cols, int) and cols > 4 else text
 
 
 def for_device(text: str, charset: str = "ascii") -> str:
     text = strip_markdown(text or "")
-    if charset == "latin1":
-        # The 5x7 font draws Latin-1 as well, so accents stay instead of folding to ASCII.
+    if charset == "cjk":
+        text = fold_cjk(text)
+    elif charset == "latin1-cyrillic":
+        text = fold_latin1_cyrillic(text)
+    elif charset == "latin1":
         text = fold_latin1(text)
     elif charset == "ascii":
         text = fold_ascii(text)
-    elif charset.replace("-", "").lower() in ("utf8", "utf_8"):
-        # Keep the CJK; drop what the font cannot draw instead of showing '?'.
-        # The degree sign is drawable here and reads as 摄氏度, so it must not take the
-        # ASCII fold ("22 degC" on a Chinese screen).
-        text = "".join(_CJK_PUNCT.get(ch, ch) if ch in _CJK_PUNCT else ch for ch in text)
-        text = "".join(ch for ch in text if _drawable(ch))
     text = "\n".join(_SPACES.sub(" ", line).rstrip() for line in text.splitlines())
     return _BLANKS.sub("\n\n", text).strip()
-
-
-_TEMP_C = r"(?:℃|°\s*C(?![A-Za-z]))"
-_TEMP_RANGE = re.compile(
-    r"(?<![\d.])([-+]?\d+(?:\.\d+)?)\s*[~～\-–—至到]\s*([-+]?\d+(?:\.\d+)?)\s*" + _TEMP_C)
-_TEMP_ONE = re.compile(r"(?<![\d.])([-+]?\d+(?:\.\d+)?)\s*" + _TEMP_C)
-_TEMP_BARE = re.compile(_TEMP_C)
-
-
-_PERCENT_RANGE = re.compile(
-    r"(?<![\d.])([-+]?\d+(?:\.\d+)?)\s*[~～\-–—至到]\s*([-+]?\d+(?:\.\d+)?)\s*[%％]")
-_PERCENT_ONE = re.compile(r"(?<![\d.])([-+]?\d+(?:\.\d+)?)\s*[%％]")
-_PERCENT_BARE = re.compile(r"[%％]")
-
-
-def speak_percent(text: str) -> str:
-    """Write percentages the way a Chinese voice says them.
-
-    A zh-CN voice reads ``62%`` in English ("percent"), and this device's reporting
-    is Chinese statistics, where the same figure is spoken 百分点. Only the spoken
-    copy is rewritten; the screen still draws the plain % sign.
-    """
-    text = _PERCENT_RANGE.sub(lambda m: f"{m.group(1)}到{m.group(2)}个百分点", text or "")
-    text = _PERCENT_ONE.sub(lambda m: f"{m.group(1)}个百分点", text)
-    return _PERCENT_BARE.sub("个百分点", text)
-
-
-def speak_celsius(text: str) -> str:
-    """Write temperatures the way a Chinese voice says them.
-
-    Hermes's spoken-text normalizer expands ``22°C`` to the English ``22 degrees Celsius``,
-    which a zh-CN voice pronounces "deg C". Ranges first, then single values, then any
-    leftover symbol. Display text is untouched: only the spoken copy goes through here.
-    """
-    text = _TEMP_RANGE.sub(lambda m: f"{m.group(1)}到{m.group(2)}摄氏度", text or "")
-    text = _TEMP_ONE.sub(lambda m: f"{m.group(1)}摄氏度", text)
-    return _TEMP_BARE.sub("摄氏度", text)

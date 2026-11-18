@@ -9,21 +9,30 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <sys/time.h>
 
 #include "freertos/FreeRTOS.h"  // must precede every other FreeRTOS header
 
 #include "board.hpp"
 #include "axp2101.hpp"
 #include "band_flush.hpp"
+#include "bmi270.hpp"
 #include "cores3.hpp"
+#include "pcf85063.hpp"
+#include "rx8130.hpp"
+#include "qmi8658.hpp"
 #include "shared_reply.hpp"
+#include "sticks3.hpp"
+#include "stopwatch.hpp"
 #include "speaker_pa.hpp"
 #include "speaker_underruns.hpp"
 #include "tag_scanner.hpp"
+#include "tailnet_watch.hpp"
 #include "wifi_fast.hpp"
 #include "wifi_pick.hpp"
 #include "wifi_power.hpp"
@@ -35,8 +44,12 @@
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_lcd_panel_io.h"
-#include "esp_lcd_panel_rgb.h"
 #include "soc/soc_caps.h"
+// The RGB panel header only exists for chips with an LCD_CAM RGB scanout
+// (ESP32-S3/P4); a classic ESP32 build has neither it nor RgbDisplay.
+#if SOC_LCD_RGB_SUPPORTED
+#include "esp_lcd_panel_rgb.h"
+#endif
 #if SOC_MIPI_DSI_SUPPORTED
 #include "esp_lcd_mipi_dsi.h"
 #include "stc8_battery.hpp"
@@ -63,26 +76,7 @@ namespace hgp {
 // Events
 
 enum class EventType : uint8_t { NetUp, NetDown, WsOpen, WsText, WsBinary, WsClosed, Mic, Console, Touch, Key,
-                                 WifiStarted, WifiDisconnected, WifiProvision, WifiScanDone, Encoder, Phone, WakeHit };
-
-// Payload of WakeHit events (posted by the wake-word task in port_wake.cpp).
-struct WakeHitSample {
-  int16_t command_id;
-  float score;  // probability the model gave the matched command word, 0.0-1.0
-};
-
-// The wake engine listens to the same microphone chunk the app gets instead of opening a
-// second microphone. One tap at a time; the engine sets it while it holds the mic.
-using MicTap = void (*)(const int16_t* samples, size_t count);
-void set_mic_tap(MicTap tap);
-// The tap in force, or nullptr. Read on every chunk, so a stop needs no synchronisation.
-MicTap mic_tap();
-
-#if CONFIG_HG_WAKE_MULTINET
-// Gives the engine the microphone the app records through (main.cpp, once at startup):
-// the engine starts and stops it, and takes samples from the tap above.
-void wake_attach(hg::AudioIn* mic);
-#endif
+                                 WifiStarted, WifiDisconnected, WifiProvision, WifiScanDone, Encoder, Phone, TimeSynced };
 
 // Payload of Phone events (posted by the Bluetooth host task).
 struct PhoneSample {
@@ -135,10 +129,16 @@ bool post(EventType type, const void* data = nullptr, size_t len = 0, uint32_t g
           ConsoleRequest* console = nullptr);
 bool receive(Event& out, TickType_t wait);
 void release(Event& ev);
+// {waiting, peak, depth, dropped} for `diag`: a full queue drops touches, keys and audio.
+hg::json::Value stats();
 }  // namespace events
 
 // ---------------------------------------------------------------------------
 // HAL implementations
+
+// Local time from the system clock; false before a real date is set (RTC or
+// network). Shared by EspSystem::wall_time and the diag report.
+bool local_wall_time(hg::WallTime& out);
 
 class EspSystem final : public hg::System {
  public:
@@ -146,11 +146,17 @@ class EspSystem final : public hg::System {
   uint64_t now_us() override;
   void random_bytes(uint8_t* out, size_t len) override;
   void log(hg::LogLevel level, std::string_view message) override;
+  bool wall_time(hg::WallTime& out) override;
   // Boards with BoardConfig::light_sleep: keeps the chip out of light sleep
   // except while dozing. Call before power management enables light sleep.
   bool enable_doze();
   void set_dozing(bool dozing) override;
   static bool dozing_now();  // for tasks that poll: poll less while dozing
+  // A lock holds the chip out of light sleep even while dozing (a Wi-Fi join attempt).
+  // A task that relies on light-sleep wakes then keeps its awake path instead.
+  static void set_sleep_held(bool held);
+  static bool sleep_held_now();
+  static inline void (*on_sleep_held_change)() = nullptr;  // e.g. end the touch task's wait
   std::function<void()> on_doze_start;  // e.g. power the speaker down
   std::function<void()> on_doze_end;    // e.g. power it up, retry Wi-Fi now: the user is back
 
@@ -185,6 +191,9 @@ class WsTransport final : public hg::Transport {
   // True when the send task has been stuck on one item for hg::ws::kStuckMs, or
   // couldn't take a client to close: the transport can't recover without a restart.
   bool stuck() const;
+  // While on (a turn), the send task logs once a second what it sent: bytes, messages, the
+  // longest send, the queue's peak, refusals, the CPU clock and the signal ("uplink: ...").
+  void set_metering(bool on) { metering_ = on; }
 
  private:
   static void on_event(void* arg, const char* base, int32_t id, void* data);
@@ -203,37 +212,13 @@ class WsTransport final : public hg::Transport {
   // message's first frame clears it.
   std::string rx_;
   uint8_t rx_opcode_ = 0;
-};
-
-// USB Serial/JTAG link (CONFIG_HG_LINK_USB_SERIAL): SLIP frames over the console
-// port, bridged to the plugin by tools/usb_relay.py on the host. No Wi-Fi and no
-// IP address; the console keeps working through the same reader.
-class SerialLink final : public hg::Transport {
- public:
-  bool begin();  // installs the driver and starts both tasks; call once
-  void connect(const std::string& url, const std::string& subprotocol) override;
-  bool send_text(std::string_view text) override;
-  bool send_binary(const uint8_t* data, size_t len) override;
-  void close() override;
-  uint32_t generation() const { return gens_.current(); }
-  bool take_lost() { return gens_.take_lost(); }
-  bool stuck() const;
-
- private:
-  struct Frame {
-    uint8_t type;
-    uint16_t len;
-    uint8_t* data;
-  };
-  static void rx_task(void* arg);
-  static void tx_task(void* arg);
-  bool enqueue(uint8_t type, const void* data, size_t len);
-  void on_frame(uint8_t type, const uint8_t* data, size_t len);
-  QueueHandle_t tx_ = nullptr;
-  hg::ws::Generations gens_;
-  hg::ws::TxWatch watch_;
-  std::atomic<bool> linked_{false};
-  std::string path_, subprotocol_;
+  std::atomic<bool> metering_{false};
+  std::atomic<uint32_t> refused_{0};  // messages enqueue() turned away for want of room
+  // The send in flight on the send task (generation 0: none), for the close reason on_event
+  // reports: a failed send closes the connection before it returns.
+  std::atomic<uint32_t> sending_gen_{0}, sending_since_{0};
+  std::atomic<uint32_t> connected_gen_{0};  // the last client generation that reached CONNECTED
+  std::atomic<size_t> sending_bytes_{0};
 };
 
 // ESP-IDF RGB timing bus with ST7701 command initialization on 3-wire SPI.
@@ -249,7 +234,9 @@ class RgbDisplay final : public hg::Display {
   }
 
  private:
+#if SOC_LCD_RGB_SUPPORTED
   static bool on_color_done(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t* edata, void* ctx);
+#endif
   LcdConfig cfg_{};
   esp_lcd_panel_io_handle_t io_ = nullptr;
   esp_lcd_panel_handle_t panel_ = nullptr;
@@ -269,17 +256,19 @@ class DsiDisplay final : public hg::Display {
   uint16_t* framebuffer() override { return fb_; }
   void flush(uint16_t y0, uint16_t y1) override;
   void set_backlight(uint8_t percent) override;
-  const char* controller_name() const { return "ek79007-dsi"; }
+  const char* controller_name() const { return controller_name_; }
 
  private:
   static bool on_color_done(esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t* event, void* ctx);
   bool wait_copy(uint32_t timeout_us);
   LcdConfig cfg_{};
   DsiPanelConfig dsi_{};
+  const char* controller_name_ = "ek79007-dsi";  // set to the panel actually created
   esp_lcd_dsi_bus_handle_t bus_ = nullptr;
   esp_lcd_panel_io_handle_t io_ = nullptr;
   esp_lcd_panel_handle_t panel_ = nullptr;
   uint16_t* fb_ = nullptr;
+  uint16_t* transform_fb_ = nullptr;  // optional mirrored DSI scanout source
   bool use_dma2d_ = true;
   std::atomic<uint32_t> flushes_{0};
 };
@@ -292,6 +281,10 @@ class SpiDisplay final : public hg::Display {
   uint16_t* framebuffer() override { return fb_; }
   void flush(uint16_t y0, uint16_t y1) override;
   void set_backlight(uint8_t percent) override;
+  // A board with no PSRAM holds a band of rows instead of the whole panel.
+  int framebuffer_rows() const override { return frame_rows_ < cfg_.height ? frame_rows_ : 0; }
+  void set_frame_origin(int y) override { frame_origin_ = y; }
+  bool take_redraw_request() override { return repaint_.exchange(false, std::memory_order_relaxed); }
   std::function<void(uint8_t)> board_backlight;
 
  private:
@@ -304,6 +297,10 @@ class SpiDisplay final : public hg::Display {
   uint16_t* bounce_ = nullptr;  // DMA-capable staging rows
   SemaphoreHandle_t done_ = nullptr;
   std::optional<hg::BandFlush> bands_;
+  int frame_rows_ = 0;  // panel rows fb_ holds (the whole panel unless it is banded)
+  int frame_origin_ = 0;  // panel row the first framebuffer row maps to
+  std::atomic<bool> repaint_{false};  // a transfer was lost: redraw the screen
+  bool paused_ = false;  // a banded flush timed out and its transfer is still pending
 };
 
 // I2S MEMS microphone: a reader task posts 20 ms PCM16 chunks while capturing.
@@ -327,6 +324,12 @@ class I2sMic final : public hg::AudioIn {
 uint32_t speaker_now_ms();
 void log_underruns(const char* tag, const hg::SpeakerUnderruns::Totals& t);
 
+// Three short beeps from the chip's own DAC, on the pin the board's amplifier
+// input hangs off (BoardConfig::speaker_dac), so the amplifier and speaker can be
+// checked before the gadget can play a reply. Blocks for about 0.6 s; a board
+// whose pin is not a DAC output does nothing. port_dac.cpp.
+bool dac_beep(int gpio);
+
 class I2sSpeaker final : public hg::AudioOut {
  public:
   bool begin(const I2sSpeakerConfig& cfg);
@@ -336,11 +339,13 @@ class I2sSpeaker final : public hg::AudioOut {
   void abort() override;
   bool busy() const override;
   void set_volume(uint8_t percent) override { volume_ = percent; }
+  size_t buffer_bytes() const override { return capacity_; }
 
  private:
   static void task(void* arg);
   i2s_chan_handle_t tx_ = nullptr;
   StreamBufferHandle_t buffer_ = nullptr;
+  size_t capacity_ = 0;
   std::atomic<uint32_t> rate_{16000};
   std::atomic<bool> open_{false};
   std::atomic<bool> draining_{false};
@@ -359,12 +364,14 @@ class P4I2sSpeaker final : public hg::AudioOut {
   void abort() override;
   bool busy() const override;
   void set_volume(uint8_t percent) override { volume_ = percent; }
+  size_t buffer_bytes() const override { return capacity_; }
 
  private:
   static void task(void* arg);
   void set_pa(bool on);
   i2s_chan_handle_t tx_ = nullptr;
   StreamBufferHandle_t buffer_ = nullptr;
+  size_t capacity_ = 0;
   std::atomic<uint32_t> rate_{16000};
   std::atomic<bool> open_{false};
   std::atomic<bool> draining_{false};
@@ -461,6 +468,13 @@ inline void report_band_event(const char* tag, hg::BandFlush::Event event) {
 
 // Pulses the board's TCA9554 reset lines before the display and touch start.
 bool tca9554_reset(i2c_master_bus_handle_t bus, const ExpanderResetConfig& reset);
+// Holds TCA9554 enable, reset and backlight levels. Keeps the I2C device.
+bool tca9554_levels_begin(i2c_master_bus_handle_t bus, const ExpanderLevelConfig& levels);
+// On when percent > 0. No effect until tca9554_levels_begin succeeds.
+void tca9554_backlight(uint8_t percent);
+// Drives ExpanderLevelConfig::power_hold low (a PCA9535 board's battery supply latch).
+// False when no latch was configured or the write failed.
+bool expander_power_off();
 
 namespace i2c {
 // The board's shared I2C master bus (created on first use).
@@ -489,11 +503,18 @@ class CodecAudio {
     float gain_db = 0;
   };
   MicLink mic_link() const { return mic_link_; }
+  // How the speaker was opened, for CodecSpeaker::allow_power_down. The microphone's
+  // format can differ (CodecAudioConfig::mic_right_slot).
+  esp_codec_dev_sample_info_t out_format() const { return out_format_; }
+  const char* mic_name() const { return mic_name_; }  // the microphone ADC begin() found, for diag
 
  private:
   i2s_chan_handle_t tx_ = nullptr, rx_ = nullptr;
   esp_codec_dev_handle_t out_ = nullptr, in_ = nullptr;
   MicLink mic_link_;
+  esp_codec_dev_sample_info_t out_format_ = {};
+  bool es7243_fitted_ = false;  // an ES7243 answered in place of the configured ES7243E
+  const char* mic_name_ = "none";
 };
 
 class CodecMic final : public hg::AudioIn {
@@ -510,8 +531,6 @@ class CodecMic final : public hg::AudioIn {
   bool rmnm_ = false;
   int16_t* raw_ = nullptr;
   std::atomic<bool> capturing_{false};
-  uint32_t dbg_chunks_ = 0;
-  uint32_t dbg_fails_ = 0;  // TEMPORARY bring-up counter, see port_codec.cpp
 };
 
 class CodecSpeaker final : public hg::AudioOut {
@@ -523,6 +542,7 @@ class CodecSpeaker final : public hg::AudioOut {
   void abort() override;
   bool busy() const override;
   void set_volume(uint8_t percent) override;
+  size_t buffer_bytes() const override { return capacity_; }
   // While dozing: close the DAC and its I2S channel (an enabled channel holds a
   // power lock that keeps the chip out of light sleep). Only for a speaker codec
   // the microphones don't share. begin() powers it back up before playing.
@@ -532,6 +552,12 @@ class CodecSpeaker final : public hg::AudioOut {
   }
   void power_down();
   void power_up();
+  // An amplifier enable that isn't an ESP32 pin (StickS3: behind the M5PM1).
+  // Used when begin() gets no PA pin; set it before begin().
+  std::function<void(bool)> board_pa;
+  // The board's ES8311 DAC fade ramp (CodecAudioConfig::dac_fade_ramp), written again when
+  // power_up() reopens the codec. Set it before begin().
+  bool es8311_fade_ramp = false;
 
  private:
   static void task(void* arg);
@@ -544,6 +570,7 @@ class CodecSpeaker final : public hg::AudioOut {
   int32_t* stereo_ = nullptr;
   std::optional<hg::SpeakerPa> pa_;  // set when this speaker, not esp_codec_dev, drives the PA pin
   StreamBufferHandle_t buffer_ = nullptr;
+  size_t capacity_ = 0;
   std::atomic<bool> open_{false};
   std::atomic<bool> draining_{false};
   std::atomic<bool> flush_{false};
@@ -556,9 +583,16 @@ class CodecSpeaker final : public hg::AudioOut {
 class TouchInput {
  public:
   bool begin(const TouchConfig& touch, const ExpanderKeyConfig& key, const EncoderConfig& encoder,
-             i2c_master_bus_handle_t bus);
+             i2c_master_bus_handle_t bus, i2c_master_bus_handle_t key_bus = nullptr);
   bool has_touch() const { return touch_dev_ != nullptr || managed_touch_ != nullptr; }
   bool has_key() const { return key_dev_ != nullptr; }
+  void nudge();  // ends the task's wait now, e.g. so a doze's end re-arms the INT edge at once
+  // The touch_wake setting: off, a doze leaves INT quiet instead of arming it as a wake source.
+  void set_wakes(bool on) { wakes_ = on; nudge(); }
+  // Counters for `diag`, safe to read from any task: whether the task still runs, how its
+  // reads go, and whether its events reach the app. A touch that stops answering, a task
+  // that stopped running and a full event queue each show as a different number here.
+  hg::json::Value stats() const;
 
  private:
   static void task(void* arg);
@@ -572,8 +606,12 @@ class TouchInput {
   static void on_encoder_b_edge(void* arg);  // IRAM: pulse-per-detent channel B
   void IRAM_ATTR encoder_pulse(int8_t channel);  // +1 = channel A, -1 = channel B; direction maps at post
   bool may_read(bool was_touching);
+  void arm_sleep_wake(bool dozing);
+  static esp_err_t on_sleep_exit(int64_t slept_us, void* arg);  // IRAM: a low INT after light sleep
   void wait(uint32_t ms);
   bool read_key(bool& pressed);
+  bool read_port(uint8_t& value);  // the key expander's input port 0
+  bool key_level(uint8_t port) const;
   TouchConfig touch_{};
   ExpanderKeyConfig key_{};
   i2c_master_dev_handle_t touch_dev_ = nullptr;
@@ -581,16 +619,90 @@ class TouchInput {
   esp_lcd_touch_handle_t managed_touch_ = nullptr;
   bool int_gated_ = false;                // FT5x06 with INT: read after an edge or with a finger down
   std::atomic<bool> int_pending_{false};  // an edge since the last read
+  bool sleep_wake_ = false;               // touch_.int_wakes, and the INT gate and sleep hook are in place
+  bool sleep_wake_armed_ = false;         // dozing: INT's edge ISR is off (and INT wakes light sleep if wakes_)
+  std::atomic<bool> wakes_{true};         // the touch_wake setting
+  bool quiet_ = false;                    // this doze leaves INT quiet (wakes_ was off when it began)
   void* task_ = nullptr;                  // the touch task, woken by an edge
   gpio_num_t encoder_a_ = GPIO_NUM_NC;
   gpio_num_t encoder_b_ = GPIO_NUM_NC;
   volatile uint8_t encoder_state_ = 0;      // last A/B sample (ISR-written)
   volatile int8_t encoder_accumulator_ = 0;  // quadrature steps toward the next detent (ISR-written)
+  int8_t encoder_steps_ = 4;                 // EncoderConfig::steps_per_detent
+  std::atomic<uint32_t> encoder_edges_{0}, encoder_detents_{0};  // for stats()
+  std::atomic<bool> int_low_{false};         // the expander INT bit at the last poll (stats())
   std::atomic<int8_t> encoder_pending_{0};   // whole detents waiting for the task to post
   bool encoder_pulse_per_detent_ = false;    // knob-ring encoder: channel = direction
   volatile int8_t encoder_first_ = 0;        // leading channel of the current detent (0 = idle)
   volatile int64_t encoder_pair_deadline_us_ = 0;  // solo-pulse timeout (task checks it)
   volatile int64_t last_edge_us_ = INT64_MIN;  // per-edge debounce (ISR-written)
+  // For stats(). Written by the task, and int_edges_ by the INT handler.
+  std::atomic<uint32_t> reads_{0}, read_errors_{0}, error_streak_{0}, int_edges_{0}, posted_{0}, post_drops_{0};
+  std::atomic<int64_t> last_read_us_{0}, last_loop_us_{0};
+};
+
+// Reads the QMI8658 at 10 Hz from its own task, on its own device handle on
+// the shared bus (ESP-IDF's i2c_master serialises the transactions), maps the
+// axes into the device frame and keeps EMA-smoothed milli-g in atomics. The
+// task never touches hg::App; the app task polls samples() and calls
+// App::on_motion directly.
+class MotionInput {
+ public:
+  bool begin(const ImuConfig& cfg, i2c_master_bus_handle_t bus);
+  // Latest smoothed sample for `diag` (0, 0, 0 before the first good read).
+  void latest(int16_t& x, int16_t& y, int16_t& z) const;
+  // Counts good reads: the app task forwards a sample only when this moved, so a
+  // sensor that stops answering goes stale in App::motion_tick instead of repeating.
+  uint32_t samples() const { return samples_.load(std::memory_order_acquire); }
+  const char* chip_name() const { return cfg_.chip == ImuChip::Bmi270 ? "bmi270" : "qmi8658"; }
+
+ private:
+  static void task(void* arg);
+  bool start_chip();
+  bool read_chip(int16_t mg[3]);
+  ImuConfig cfg_{};
+  i2c_master_dev_handle_t dev_ = nullptr;
+  std::unique_ptr<hg::Qmi8658> chip_;
+  std::unique_ptr<hg::Bmi270> bmi270_;
+  std::atomic<int16_t> x_{0}, y_{0}, z_{0};
+  std::atomic<uint32_t> samples_{0};
+};
+
+// Wall time: the PCF85063 seeds the system clock at boot (UTC; days-from-
+// civil, never mktime), the `timezone` setting (POSIX TZ, default UTC0)
+// offsets it for display, and SNTP (pool.ntp.org) keeps both current while
+// the clock face is wanted and the network is up. A sync posts a TimeSynced
+// event; the app task then writes the RTC back. A user who never turns the
+// clock on sends no time traffic.
+class TimePort {
+ public:
+  // Seeds the clock when the RTC is present and valid, then applies the stored
+  // timezone. Never fails: without a usable RTC the clock starts with network
+  // time and the features that need it stay off until then.
+  void begin(const RtcConfig& cfg, i2c_master_bus_handle_t bus, hg::Storage& storage);
+  // Re-reads the `timezone` setting from storage and applies it.
+  void apply_timezone(hg::Storage& storage);
+  // The network came up or went down; SNTP runs while it and the demand hold.
+  void set_network(bool up);
+  // The clock face turned on or off: SNTP runs only while it is wanted.
+  void set_wanted(bool on);
+  // A sync arrived: records it and writes the RTC from the system clock.
+  void on_synced();
+  bool rtc_ready() const { return chip_ != nullptr || rx8130_ != nullptr; }
+  const char* rtc_name() const { return rx8130_ ? "rx8130" : chip_ ? "pcf85063" : "none"; }
+  hg::json::Value diag() const;  // {valid, synced, utc} for the diag report
+
+ private:
+  static void on_sntp(struct timeval* tv);  // SNTP context: posts TimeSynced
+  void sync_sntp();  // starts or stops SNTP after set_network/set_wanted
+  i2c_master_dev_handle_t dev_ = nullptr;
+  std::unique_ptr<hg::Pcf85063> chip_;  // one of the two, by RtcConfig::chip
+  std::unique_ptr<hg::Rx8130> rx8130_;
+  bool read_rtc(hg::WallTime& utc) { return rx8130_ ? rx8130_->read(utc) : chip_->read(utc); }
+  bool write_rtc(const hg::WallTime& utc) { return rx8130_ ? rx8130_->write(utc) : chip_->write(utc); }
+  bool network_up_ = false, wanted_ = false;
+  bool sntp_started_ = false;
+  bool synced_ = false;  // set and read on the app task
 };
 
 #if SOC_MIPI_DSI_SUPPORTED
@@ -633,10 +745,62 @@ class CoreS3Board {
  public:
   bool begin(i2c_master_bus_handle_t bus);
   void set_backlight(uint8_t percent);
+  // The GC0308's power/reset line: AW9523B P1_0, routed through CoreS3Control.
+  bool camera_power(bool on);
+  // The camera ribbon's power supplies down (the counterpart of camera_power(true)'s
+  // rails), leaving everything else on the same PMIC registers as it is.
+  bool camera_rails_off();
 
  private:
   i2c_master_dev_handle_t pmic_ = nullptr, expander_ = nullptr;
   std::unique_ptr<hg::CoreS3Control> control_;
+};
+
+// The CoreS3's hg::Camera implementation (port_camera_cores3.cpp). camera_hal()
+// returns nullptr on any other board; camera_hal_set_display() gives it the
+// panel for the live preview (call once after the display is up). The pipeline
+// starts on demand — camera_hal_begin() runs after the board's camera rails and
+// reset pulse — and camera_hal_stop() is its counterpart. A failed start
+// latches for the boot (camera_hal_start_failed(), and available() goes false).
+hg::Camera* camera_hal();
+void camera_hal_set_display(hg::Display* display);
+bool camera_hal_begin();
+bool camera_hal_running();
+bool camera_hal_start_failed();
+void camera_hal_stop();
+
+// The M5PM1's rails, amplifier and battery. Hal::power once begin() succeeded.
+class StickS3Board final : public hg::Power {
+ public:
+  bool begin(i2c_master_bus_handle_t bus);
+  void set_amplifier(bool on);
+  std::optional<hg::PowerStatus> read() override { return control_->read(); }
+  bool power_off() override { return control_->power_off(); }
+  std::optional<bool> external_power() override { return control_->external_power(); }
+
+ private:
+  i2c_master_dev_handle_t pm1_ = nullptr;
+  std::unique_ptr<hg::StickS3Control> control_;
+};
+
+// The StopWatch's M5IOE1 (supplies, resets, amplifier) and M5PM1 (battery, red key,
+// shutdown). Hal::power once begin() succeeded.
+class StopWatchBoard final : public hg::Power {
+ public:
+  bool begin(i2c_master_bus_handle_t bus);
+  void set_amplifier(bool on);
+  void use_curves(hg::Curve discharge, hg::Curve charge) {
+    if (control_ && discharge) control_->use_curves(discharge, charge);
+  }
+  std::optional<hg::PowerStatus> read() override { return control_->read(); }
+  bool power_off() override { return control_->power_off(); }
+  bool take_key_press() override { return control_->take_key_press(); }
+  std::optional<bool> external_power() override { return control_->external_power(); }
+
+ private:
+  i2c_master_dev_handle_t pm1_ = nullptr;
+  i2c_master_dev_handle_t ioe_ = nullptr;
+  std::unique_ptr<hg::StopWatchControl> control_;
 };
 
 // Opus reply audio (port_opus.cpp). It decodes on the app task, whose stack
@@ -662,6 +826,9 @@ class LatchPower final : public hg::Power {
   std::optional<bool> external_power() override;
   bool take_key_press() override;
   static constexpr int64_t kKeyHoldMs = 2500;
+  // A supply latch that isn't an ESP32 pin (the SenseCAP Watcher's PCA9535 P1.2).
+  // Used by power_off() when the config has no enable pin; set it before the app starts.
+  std::function<bool()> board_power_off;
 
  private:
   bool charging_signal() const;
@@ -774,7 +941,7 @@ class Wifi {
   bool attempt_held_ = false;
   void hold_while_attempting();
   hg::WifiPowerSave power_save_;
-  void apply_power_save(uint32_t now, bool in_turn);
+  void apply_power_save(uint32_t now, const hg::App& app);
   hg::WifiCredentials candidate_{};
   httpd_handle_t http_ = nullptr;
   std::mutex setup_mutex_;
@@ -804,6 +971,42 @@ class PhoneLink {
   void set_name(const std::string& name);
 };
 
+// The device's own Tailscale node (TailTiny, components/tailtiny), for a Hermes host
+// that only listens on its tailnet address (docs/tailnet.md). Call everything from
+// the app task. It reports to hg::App::on_tunnel; TailTiny's own tasks never call
+// the app.
+class TailnetLink {
+ public:
+  // The build has CONFIG_HG_TAILNET and the board BoardConfig::tailnet.
+  static bool supported();
+  // `name` becomes the device's tailnet hostname (lowercased, other characters as '-').
+  // Runs before Wi-Fi, so before TailTiny starts: it carries out a pending forget().
+  void begin(hg::App& app, const std::string& name);
+  void network_up();    // Wi-Fi has an address: start the node, or move it to the new network
+  void network_down();  // Wi-Fi is gone: the tunnel is too, until network_up()
+  // `tailnet` or `ts_key` changed. Starting is live; stopping, or a new key for a
+  // running node, restarts the device (TailTiny can't stop and start again cleanly).
+  void settings_changed();
+  void tick(uint32_t now);
+  // Factory reset: TailTiny's keys and cached peers, erased at the next boot. False when
+  // that couldn't be scheduled.
+  bool forget();
+  void report(hg::json::Value& r);  // the `diag` report's "tailnet" part
+
+ private:
+  void start();
+  hg::App* app_ = nullptr;
+  void* node_ = nullptr;   // tailtiny_t*
+  std::string key_;        // the key node_ registered with (TailTiny keeps a pointer)
+  std::string name_;       // its tailnet hostname, likewise
+  uint32_t server_ip_ = 0; // Hermes's tailnet address in host order; 0 when it isn't one
+  bool wifi_up_ = false;
+  bool reset_unresolved_ = false;  // a factory-reset request begin() couldn't read or carry out
+  hg::TailnetWatch watch_;
+  bool restart_ = false, restart_timed_ = false;
+  uint32_t next_check_ = 0, restart_at_ = 0;
+};
+
 namespace diag {
 // What came up at boot, for the boot summary and the `diag` report.
 struct Parts {
@@ -812,7 +1015,12 @@ struct Parts {
   const char* speaker = "none";
   bool touch = false;
   bool key = false;
+  const char* imu = "none";
+  const char* rtc = "none";
   i2c_master_bus_handle_t i2c = nullptr;  // scanned by `diag`
+  MotionInput* motion = nullptr;          // latest sample for the report
+  TimePort* time = nullptr;       // time state for the report
+  const TouchInput* touch_input = nullptr;  // its counters for the report
 };
 
 // Starts keeping a RAM copy of recent log lines. Call first in app_main.
@@ -822,7 +1030,11 @@ void set_parts(const Parts& parts);
 void log_boot_summary();
 // The port's half of the console's `diag` report (hg::App::on_diag).
 void report(hg::json::Value& r);
-// The log copy, oldest line first (hg::App::recent_log).
+// A whole `@diag` reply from the port alone, for when the app task doesn't answer:
+// memory, tasks, events, touch and the last crash. Safe from any task.
+std::string report_without_app();
+// The log copy, oldest line first (hg::App::recent_log). After a restart that kept
+// RAM, it opens with the previous boot's lines between `@log` marker lines.
 std::string recent_log();
 }  // namespace diag
 
