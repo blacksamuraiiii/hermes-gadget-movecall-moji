@@ -70,7 +70,8 @@ struct UiModel {
   // Set while a reminder is fresh (approval waiting, a question, a finished task).
   Notice notice = Notice::None;
   // A look the host asked for by name (`emote` message): what the AI thought the turn
-  // deserved. It outranks notice, emote and the screen until it expires.
+  // deserved. It outranks the timed emote and the screen until it expires; what the board
+  // itself knows (the link, her own playback, a reminder waiting) still comes first.
   emoji::Look look = emoji::Look::Neutral;
   bool look_set = false;
   // The wake cue ("我在") is playing: that is a greeting, not a reply.

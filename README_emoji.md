@@ -65,8 +65,9 @@
 - 插件 `plugin/tools.py` 注册进 gadget 工具集，enum 列全 20 态，`hub.emote()` 发
   `{"emote": {"look": "...", "ttl_s": 8}}`；
 - 固件 `h_emote()` 把名字映射成 `emoji::Look`，存 `named_look_` 并按 ttl 过期；
-  `emoji_look()` 里 **named look 优先于 notice / link / screen**——它是 AI 对这一轮
-  内容的判断，比状态推断更该说话；
+  `emoji_look()` 的优先级是 **link → 唤醒应答 → 正在播报 → 提醒 → named look → emote → 屏幕**：
+  设备自己知道的状态（断链、她正在说、有事要你处理）压过 AI 命名的脸，named look 只压过
+  计时 emote 与屏幕推断；
 - profile `gadget-emoji` 的 SOUL.md 写明：屏上只有表情、回复仍朗读、一轮最多调一次、
   情绪不明显就不调（交给静息轮换）。
 

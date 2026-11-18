@@ -737,7 +737,7 @@ void App::h_display(const json::Value& m) {
   overlay_until_ = ttl <= 0 ? 0 : now() + static_cast<uint32_t>(ttl * 1000);
 }
 
-// The resting rotation: six calm faces, never the one already up.
+// The resting rotation: eight calm faces, never the one already up.
 emoji::Look App::pick_idle_look() {
   static constexpr emoji::Look kPool[] = {emoji::Look::Neutral, emoji::Look::Cool,
                                           emoji::Look::Happy,   emoji::Look::Bored,

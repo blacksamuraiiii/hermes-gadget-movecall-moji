@@ -198,6 +198,9 @@ uint32_t emoji_anim_key(const UiModel& m) {
     case emoji::Look::Shocked:
     case emoji::Look::Embarrassed:
     case emoji::Look::Winking:
+    case emoji::Look::Excited:  // the stars twinkle
+    case emoji::Look::Bored:    // the half-shut eyes sink
+    case emoji::Look::Hi:       // the eyes grow, then the rays pulse
       // These animate on the GIF's 20-frame cycle, so they repaint every frame.
       return static_cast<uint32_t>(look) * 16 + (m.frame % 20);
     default: return static_cast<uint32_t>(look) * 16 + ((m.frame % 45) < 2 ? 1u : 0u);
