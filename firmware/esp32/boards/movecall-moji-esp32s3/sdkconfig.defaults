@@ -1,0 +1,42 @@
+# Movecall Moji: ESP32-S3-WROOM-1-N16R8 (8 MB octal PSRAM), 16 MB flash, 1.28"
+# round 240x240 GC9A01 over SPI, one ES8311 for both directions with an analog
+# microphone, NS4150B amplifier, BOOT key, white status LED. No battery, no
+# touch, no IMU, no SD.
+# Pins: docs/hardware.md#movecall-moji-esp32-s3
+CONFIG_IDF_TARGET="esp32s3"
+# CONFIG_ESPTOOLPY_FLASHSIZE_4MB is not set
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+# The whole-panel framebuffer and the audio buffers go to PSRAM.
+CONFIG_SPIRAM_USE_MALLOC=y
+# If PSRAM ever fails to start, boot anyway so the log and `diag` can say so.
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+# lwIP's default 5,760-byte window holds a connection far below 24 kHz microphone
+# audio on a slow link, and recordings lose frames: 32 KB windows over Wi-Fi, with
+# the buffers in PSRAM. docs/porting.md#network-buffers
+CONFIG_LWIP_TCP_WND_DEFAULT=32768
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=32768
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+# The board's only port is the S3's own USB Serial/JTAG, so the console must live
+# there: a secondary console is output-only, and commands typed over USB would
+# never arrive.
+# CONFIG_ESP_CONSOLE_UART_DEFAULT is not set
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_HG_BOARD_MOVECALL_MOJI=y
+# The generic partitions.csv stays inside 4 MB for the other boards; this 16 MB
+# board keeps its own table so the slots match what the flashed devices already
+# carry (changing it needs a full `idf.py flash` over USB).
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions-moji.csv"
+
+# No text: the board draws the pure-emoji face and nothing else, so it carries no
+# CJK table (HG_CORE_FONT_CJK is a CMake option, off by default). The mascot
+# bitmaps that every v0.6 image links are simply never drawn here.
+
+# Wake word and the USB transport are this fork's own work and are re-ported in
+# later steps; until then the board boots with the Wi-Fi link and the BOOT key.
+# CONFIG_HG_WAKE_MULTINET
+# CONFIG_HG_LINK_USB_SERIAL

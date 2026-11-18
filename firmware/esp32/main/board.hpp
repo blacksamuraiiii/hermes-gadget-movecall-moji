@@ -110,8 +110,16 @@ struct LcdConfig {
   uint8_t font_scale = 1;  // UI text scale multiplier, clamped so the scale stays 1..4 (hg::DisplayInfo)
   uint16_t mascot_px = 0;   // largest mascot bitmap; 0 keeps the largest that fits
   // SPI data-in (the CYD wires its panel's SDO to GPIO 12); -1 when unused.
-  // Last, so positional initializers written before it existed keep their meaning.
   int miso = -1;
+  // Appended last, so positional initializers written before these existed keep their meaning.
+  // The UI square on a round panel, in thousandths of the short side. The text screens
+  // keep the inscribed square (707) so lines stay off the corners; a board that draws no
+  // text at all (emoji_face) can use the whole circle (1000).
+  uint16_t round_area_permille = 707;
+  // A board with one key and no touch: no hint row at the bottom, and the header takes
+  // the place of the top band instead of sitting under it.
+  bool no_bottom_bar = false;
+  bool no_top_band = false;
 };
 
 struct I2sMicConfig {
@@ -392,6 +400,9 @@ struct BoardConfig {
   // e.g. the CYD's SC8002B on GPIO26. It plays the boot beeps (port_dac.cpp); the
   // gadget's replies are not routed there yet.
   int speaker_dac = -1;
+  // Draw this board's own pure-emoji face (hg/emoji_face.hpp) instead of the mascot
+  // bitmaps: eyes only, no text, no header. See notes/设计-小墨纯表情.md.
+  bool emoji_face = false;
   const char* talk_label = "TALK";
   const char* cancel_label = "CANCEL";
 };

@@ -27,6 +27,7 @@ Hardware ports remain experimental until the [verification table](hardware-valid
 | [Xorigin AIPI Lite](hardware.md#xorigin-aipi-lite) | Hold BOOT to talk; the power key cancels | Onboard microphone and speaker |
 | [Spotpear ESP32-S3-1.28-BOX](hardware.md#spotpear-esp32-s3-128-box) | Hold the screen or BOOT to talk; swipe down to cancel | Onboard microphone and speaker; battery |
 | [Spotpear ESP32-S3-1.54 muma](hardware.md#spotpear-esp32-s3-154-muma) | Hold the screen or BOOT to talk; swipe down to cancel | Onboard microphone and speaker |
+| [Movecall Moji](hardware.md#movecall-moji-esp32-s3) | Hold BOOT to talk | Onboard analog microphone and speaker. Draws the pure-emoji face, no text |
 | [Espressif ESP32-S3-BOX](hardware.md#esp32-s3-box) | Hold the screen or BOOT to talk | Onboard microphones and speaker. Experimental |
 | [Espressif ESP32-S3-Korvo-2](hardware.md#esp32-s3-korvo-2) | Hold the screen to talk | Onboard microphones and speaker. Needs the LCD sub-board. Experimental |
 | [LCDWIKI ES3C28P](hardware.md#lcdwiki-es3c28p) | Hold the screen or BOOT to talk; swipe down to cancel | Onboard microphone; speaker output. Experimental |

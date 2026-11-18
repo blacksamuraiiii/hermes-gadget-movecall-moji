@@ -916,6 +916,65 @@ The USB-C port is the S3's own USB Serial/JTAG, used for both flashing and the s
 
 The CO5300 start-up table and the pin map come from Waveshare's [board support package](https://github.com/waveshareteam/Waveshare-ESP32-components/tree/63ac675334db62509082e182ff900bf60f21f009/bsp/esp32_s3_touch_amoled_2_16) 2.0.1 at commit `63ac675`, checked against the [product documentation](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-2.16); see [THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES.md).
 
+## Movecall Moji (ESP32-S3)
+
+Board option `movecall-moji`, the Movecall Moji desktop companion (墨迹板). All-in-one: nothing to wire.
+
+- **Module:** ESP32-S3-WROOM-1-N16R8, 16 MB flash, 8 MB octal PSRAM (an `AP` part at 80 MHz on the board tested).
+- **Panel:** 1.28" round 240x240 GC9A01 over SPI at 40 MHz. Mirror X on, mirror Y off, colour invert on, BGR element order — the same bring-up xiaozhi-esp32 uses for this board. Espressif's default GC9A01 init table is used; add a `Gc9a01Panel` entry only if the glass shows wrong gate timing or a washed-out picture.
+- **Audio:** one ES8311 for both directions. The microphone is an AP2718AT analog part on the ES8311's own ADC (no ES7210), and the amplifier is an NS4150B fed from USB 5 V.
+- **Inputs:** the BOOT key only, as talk. No cancel key, no scroll keys, no touch.
+- **No battery, no charger, no fuel gauge:** the device reports no power readings.
+- **Display:** this port draws 小墨's pure-emoji face (`notes/设计-小墨纯表情.md`) instead of the Hermes mascot: eyes only, no headline, no body text, no hint row. The firmware carries no CJK table (a textless screen has no use for one). Porting that face onto the current UI layer is tracked in `notes/合并-上游0.6.md`.
+
+| Signal | ESP32-S3 GPIO |
+|---|---|
+| LCD SCLK | 16 |
+| LCD MOSI | 17 |
+| LCD CS | 15 |
+| LCD DC | 7 |
+| LCD RST | 18 |
+| LCD backlight (PWM, high = bright) | 3 |
+| Codec I2C SDA / SCL | 5 / 4 |
+| I2S MCLK | 6 |
+| I2S BCLK | 14 |
+| I2S WS | 12 |
+| I2S DOUT (ESP32 to codec) | 11 |
+| I2S DIN (codec to ESP32) | 13 |
+| Amplifier enable (PA) | 9 |
+| BOOT key (talk) | 0 |
+| Status LED (white, single colour) | 21 |
+
+I2S DIN is GPIO 13 and DOUT is GPIO 11: DIN carries the codec's ADC into the ESP32, DOUT carries the ESP32's audio to the codec's DAC.
+
+Hardware facts come from the vendor's open-hardware page (`oshub`/立创 project `movecall/moji-xiaozhi-ai-derivative-edition`, CC BY-NC 4.0) and from xiaozhi-esp32's `main/boards/movecall/moji-esp32s3/config.h`; the board in hand matches both (chip rev v0.2, 8 MB PSRAM, GD flash).
+
+```bash
+cd firmware/esp32
+
+# PlatformIO
+pio run -e movecall-moji -t upload -t monitor
+
+# or ESP-IDF: on this board the console and the flash port are the same USB
+# Serial/JTAG port, so one cable does both.
+idf.py -B build/movecall-moji -D SDKCONFIG=build/movecall-moji/sdkconfig \
+  -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;boards/movecall-moji-esp32s3/sdkconfig.defaults" \
+  -p COM5 flash monitor
+```
+
+A prebuilt `movecall-moji-esp32s3` image flashes with any ESP32-S3 flasher; the four offsets are in the build's `flasher_args.json` (bootloader `0x0`, partition table `0x8000`, otadata `0xf000`, app `0x20000`).
+
+### First flash: what to check
+
+- The boot log must show `gc9a01 240x240 ready`, then `codecs: speaker ready, microphones ready (es8311 analog)`, and `parts: display gc9a01, microphone es8311, speaker es8311`. The board name never appears in the log: the image carries it as the `HGBOARD=` tag, which only the updater uses to refuse another board's firmware. A wrong image still boots — it just drives the wrong pins.
+- The screen stays black but the log is clean: the panel may need its own `Gc9a01Panel` table, or the backlight polarity is inverted on this glass revision. Read the boot log for these three lines before blaming the panel, because each names a different cause:
+  - `PSRAM configured but none initialised` (error): this build has PSRAM enabled and the module did not bring it up — a hardware or module problem.
+  - `built without PSRAM (CONFIG_SPIRAM=n)` and `PSRAM not compiled in (CONFIG_SPIRAM=n)`: the image itself was built without PSRAM, so the panel runs from internal RAM by design. Wrong image for a module that has PSRAM, expected on one that has none.
+  - `no PSRAM framebuffer` (warning): PSRAM is configured but the framebuffer did not fit — it is full or partly broken.
+  In all three the panel runs from internal RAM and audio will stutter; none of them is a panel or backlight fault.
+- Hold BOOT and speak: a recording that never shows speech means the analog mic path or the ES8311 solder joint is at fault (the vendor's own FAQ names the same two joints).
+- The console is USB Serial/JTAG only. If commands typed in a terminal never arrive, `CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y` is missing from the board's defaults.
+
 ## Xorigin AIPI Lite
 
 Board option `aipi-lite`, for Xorigin's AIPI Lite: an ESP32-S3 with 16 MB flash and 8 MB octal PSRAM, a 128×128 ST7789 panel, one ES8311 codec for both the speaker and the microphone, BOOT and power keys, and a battery. This port is experimental.

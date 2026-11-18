@@ -76,6 +76,8 @@ namespace {
 #define HG_BOARD_NAME "waveshare-esp32-s3-touch-lcd-1.83"
 #elif CONFIG_HG_BOARD_ESP32_CYD
 #define HG_BOARD_NAME "esp32-2432s028-cyd"
+#elif CONFIG_HG_BOARD_MOVECALL_MOJI
+#define HG_BOARD_NAME "movecall-moji-esp32s3"
 #else
 #define HG_BOARD_NAME "custom"
 #endif
@@ -1692,6 +1694,62 @@ BoardConfig make() {
   b.buttons = {0, -1, -1, -1};
   b.talk_label = "G0";
   b.cancel_label = "Fn+Esc";
+  return b;
+}
+#elif CONFIG_HG_BOARD_MOVECALL_MOJI
+// Movecall Moji: ESP32-S3-WROOM-1-N16R8, 16 MB flash, 1.28" round 240x240
+// GC9A01 over SPI, one ES8311 for both directions with an analog microphone on
+// its own ADC, NS4150B amplifier, BOOT key, white status LED. No battery, no
+// touch, no IMU. Pins: xiaozhi-esp32 board movecall/moji-esp32s3; the panel
+// mirror/invert/BGR set follows that board's bring-up, which is what lights it.
+BoardConfig make() {
+  BoardConfig b{};
+  b.name = kBoardName;
+  b.lcd.enabled = true;
+  b.lcd.controller = LcdController::Gc9a01;
+  b.lcd.width = 240;
+  b.lcd.height = 240;
+  b.lcd.round = true;
+  b.lcd.swap_xy = false;
+  b.lcd.mirror_x = true;
+  b.lcd.mirror_y = false;
+  b.lcd.invert = true;
+  b.lcd.bgr = true;
+  b.lcd.mosi = 17;
+  b.lcd.sclk = 16;
+  b.lcd.cs = 15;
+  b.lcd.dc = 7;
+  b.lcd.rst = 18;
+  b.lcd.backlight = 3;
+  b.lcd.backlight_invert = false;  // PWM on GPIO3, high = bright
+  b.lcd.spi_mhz = 40;
+  b.i2c = {5, 4, 400000};
+  b.codec.enabled = true;
+  b.codec.mclk = 6;
+  b.codec.bclk = 14;
+  b.codec.ws = 12;
+  b.codec.dout = 11;
+  b.codec.din = 13;
+  b.codec.pa = 9;
+  b.codec.mic = MicCodec::Es8311;  // AP2718AT analog mic on the ES8311 ADC
+  // Measured on this board: ambient peak 50-90, speech peak up to 841, i.e. an RMS well under
+  // 100 at the default gain. Tap mode's 500 floor therefore never counted a word as speech and
+  // every turn closed as "no speech" (the screen dropped back to idle mid-sentence). 30 dB puts
+  // the microphone at the level the Kconfig gain assumes; 150 sits above this room's noise.
+  // drop_silent_recordings stays off until the floor is measured here.
+  b.codec.mic_gain_db = 30.0f;
+  b.codec.vad_min_rms = 150.0f;
+  b.buttons = {0, -1, -1, -1};  // BOOT only: talk, no cancel or scroll
+  b.status_led = 21;
+  // 小墨's pure-emoji face (notes/设计-小墨纯表情.md): eyes only, no text, no header.
+  b.emoji_face = true;
+  // The 1.28" glass runs to the bezel, and a face has no text to keep off the round
+  // corners, so it uses the whole circle: 1000 = the full 240 px (the text screens
+  // keep the inscribed 707).
+  b.lcd.round_area_permille = 1000;
+  b.lcd.no_bottom_bar = true;  // one BOOT key: no hint row
+  b.lcd.no_top_band = true;    // no touch: no settings hold target, nothing to reserve
+  b.talk_label = "BOOT";
   return b;
 }
 #elif CONFIG_HG_BOARD_CUSTOM
