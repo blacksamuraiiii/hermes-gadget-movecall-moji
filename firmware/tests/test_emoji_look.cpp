@@ -1,8 +1,8 @@
 // What a pure-emoji board puts on screen for a given model, and in what order the model's
-// signals win. The order is the promise: what the board itself knows (the link, her own
-// playback, a question waiting on the user) beats what the host guessed with a named face,
-// and a named face beats the screen's own expression. A regression here is invisible in a
-// screenshot until the wrong face is on the glass at the wrong moment, so it is pinned here.
+// signals win. The order is the promise: link -> her own wake cue -> a question waiting
+// -> a finished turn -> the reply's own mood -> her own playback -> a named face
+// -> the screen. A regression here is invisible in a screenshot until the wrong face is on
+// the glass at the wrong moment, so it is pinned here.
 #include <cstdint>
 
 #include "check.hpp"
@@ -43,10 +43,46 @@ TEST("emoji look: the wake cue outranks the speaking mouth") {
   UiModel m = model(Screen::Responding);
   m.speaking = true;
   m.wake_cue = true;
-  CHECK(hg::emoji_look(m) == Look::Happy);  // she waves the maracas, not opens the talking mouth
+  CHECK(hg::emoji_look(m) == Look::Hi);  // she says Hi, not opens the talking mouth
 
   m.wake_cue = false;
   CHECK(hg::emoji_look(m) == Look::Speaking);
+}
+
+// The whole priority chain, driven directly: link -> wake -> reminder -> done ->
+// mood -> Speaking -> named look -> screen.
+TEST("emoji look: a reply mood beats Speaking, a reminder beats both") {
+  UiModel m = model(Screen::Responding);
+  m.speaking = true;
+  // The wake cue is a greeting (Hi), not a reply.
+  m.wake_cue = true;
+  CHECK(hg::emoji_look(m) == Look::Hi);
+  m.wake_cue = false;
+  // A reply mood wears its own face while the reply is spoken.
+  m.mood_set = true;
+  m.mood = Look::Laughing;
+  CHECK(hg::emoji_look(m) == Look::Laughing);
+  // A blocking reminder beats the mood: the user has to act on it.
+  m.screen = Screen::Prompt;
+  CHECK(hg::emoji_look(m) == Look::Silly);
+  m.screen = Screen::Choice;
+  CHECK(hg::emoji_look(m) == Look::Shocked);
+  m.screen = Screen::Responding;
+  // A finished timer/task is Excited now, not Happy — and it beats the mood too.
+  m.done_cue = true;
+  CHECK(hg::emoji_look(m) == Look::Excited);
+  m.done_cue = false;
+  m.mood_set = false;
+  // Without a mood, Speaking still wins over a named look, and the named look
+  // shows once the playback stops.
+  m.look_set = true;
+  m.look = Look::Happy;
+  CHECK(hg::emoji_look(m) == Look::Speaking);
+  m.speaking = false;
+  CHECK(hg::emoji_look(m) == Look::Happy);
+  // No mood means no mood face: the screen's own face comes back.
+  m.look_set = false;
+  CHECK(hg::emoji_look(m) == Look::Neutral);
 }
 
 TEST("emoji look: a question waiting outranks the host's named face") {
@@ -59,15 +95,16 @@ TEST("emoji look: a question waiting outranks the host's named face") {
   CHECK(hg::emoji_look(m) == Look::Shocked);  // "!!" — the host needs a choice
 }
 
-TEST("emoji look: a finished turn is happy before the resting face comes back") {
+TEST("emoji look: a finished turn is excited before the resting face comes back") {
   UiModel m = model(Screen::Ready);
   m.done_cue = true;
-  CHECK(hg::emoji_look(m) == Look::Happy);
+  CHECK(hg::emoji_look(m) == Look::Excited);
 
-  // But a named face for the next turn still wins over the cue.
+  // A named face for the next turn does not displace the cue: the cue is the
+  // board's own state, so it goes first until it ends.
   m.look = Look::Bored;
   m.look_set = true;
-  CHECK(hg::emoji_look(m) == Look::Happy);  // the cue is the board's own state: it goes first
+  CHECK(hg::emoji_look(m) == Look::Excited);  // the cue is the board's own state: it goes first
   m.done_cue = false;
   CHECK(hg::emoji_look(m) == Look::Bored);
 }
@@ -114,10 +151,14 @@ TEST("emoji animation: a still face stops repainting, a moving one does not") {
   t.frame += 2;
   CHECK(hg::emoji_anim_key(t) != t0);
 
-  // The speaking face's bars follow the microphone level.
+  // The speaking face is a fixed 20-frame wave: the mic level does not move it
+  // (draw_speaking_bars ignores the level — her own voice would be the only level
+  // on the board), so a level change leaves the key alone and a frame step moves it.
   UiModel s = model(Screen::Responding);
   s.speaking = true;
   const uint32_t s0 = hg::emoji_anim_key(s);
   s.level = 60;
+  CHECK(hg::emoji_anim_key(s) == s0);
+  s.frame += 1;
   CHECK(hg::emoji_anim_key(s) != s0);
 }

@@ -187,10 +187,17 @@ struct UiModel {
   bool emoji = false;
   // A look the host named for this turn (`emote`, or `face.set` mapped onto the 20 states):
   // what the AI thought the answer deserved. It outranks the screen's own face until it
-  // expires; what the board itself knows (the link, her own playback, a question waiting)
-  // still comes first. See emoji_look in ui.cpp for the whole order.
+  // expires; what the board itself knows (the link, her own playback, a question waiting,
+  // a finished turn, the reply's mood) still comes first. See emoji_look in ui.cpp for
+  // the whole order.
   emoji::Look look = emoji::Look::Neutral;
   bool look_set = false;
+  // The face for the reply now being spoken: the host sent a mood with the reply.
+  // Checked after the wake cue and the reminder tiers and before Speaking, so the
+  // reply wears its own face instead of the generic wave; it only lives while the
+  // turn is in Responding (see App::reply_mood_).
+  emoji::Look mood = emoji::Look::Neutral;
+  bool mood_set = false;
   // The wake cue ("我在") is playing: she is answering to her name, not reporting a reply.
   bool wake_cue = false;
   // A turn just ended: the face says so for a moment, then the resting rotation resumes.

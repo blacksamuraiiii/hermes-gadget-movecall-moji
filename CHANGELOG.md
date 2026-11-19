@@ -155,6 +155,23 @@ Left out, and why:
 
 ## Unreleased
 
+- The emoji face's priority, idle timing and mood wiring now match the code
+  (`README_emoji.md`, `notes/设计-小墨纯表情.md`): one chain — link, wake greeting
+  (Hi), reminder (approval Silly / choice Shocked) or done (Excited), reply mood,
+  Speaking, named face, screen; the resting pool is seven looks (Bored is not in
+  it), Bored at 140 s idle, Sleeping at 180 s. Replies can wear a mood via a
+  `[mood:name]` tag (12 names, `surprised` reads as `shocked`, unknown names are
+  dropped, never silently Neutral); the profile prompt is printed verbatim in
+  `README_emoji.md` §四. Sleeping and Loving match the GIF geometry (U arcs,
+  T mouth at y=139, heart s=20), Speaking is a fixed 20-frame wave, and the
+  connecting GIF finally spins — the dump draws the ring with `Ui::draw_emoji`'s
+  geometry. Five GIFs changed in content (connecting, sleeping, loving, silly,
+  thinking); the other fifteen are pixel-identical re-encodes. Known gap: the
+  empty-reply → embarrassed fallback is not wired in this tree (the tool-token
+  stripping it hung on did not survive the rebase). Font tests are skipped in
+  moji's test runs (a textless board has no CJK font); the font code stays in the
+  shared core library.
+
 ## 0.6.0
 
 Hermes Gadget 0.6.0 gives the agent more to do with a gadget. It can play a sound file or a radio stream on the speaker (`gadget_play`), show lists, progress bars and QR codes, ask a question with up to six answers on the screen (`gadget_ask`), set the face's expression, and fill the idle screen with widgets such as a disk's fill level or the room temperature. Interpreter mode turns a gadget into a translator that two people pass back and forth. Messages and cron jobs sent to a gadget outside a turn are spoken, and `hermes gadget bot-chat` lets a gadget talk to Hermes Bot Mode. Profile switching works on a stock Hermes with `profile_mode: virtual`, and a board's diagnostics report comes over the network, with the reason for a hang or a restart. The M5Stack CoreS3 gains its camera, as a `camera.capture` action and a camera mode with a live view. Five experimental board profiles arrive: the M5Stack StopWatch, the M5Stack Cardputer ADV, the Seeed Studio SenseCAP Watcher W1-A, the Waveshare ESP32-S3-Touch-LCD-1.47 and the LCDWIKI ES3C28P. The Waveshare ESP32-P4-WIFI6-Touch-LCD-3.4C boots on esp-hosted 2.12, and its speaker pops less when it turns on and off. Details by area follow.

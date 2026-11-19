@@ -341,8 +341,8 @@ uint16_t caption_color(Screen s) {
 }  // namespace
 
 // The face a pure-emoji board shows. The order is the promise: what the board knows beats
-// what the host guessed. link -> her own wake cue -> her own playback -> a question waiting
-// -> a finished turn -> the AI's named face -> the screen.
+// what the host guessed. link -> her own wake cue -> a question waiting -> a finished
+// turn -> the reply's own mood -> her own playback -> the AI's named face -> the screen.
 emoji::Look emoji_look(const UiModel& m) {
   switch (m.link) {
     case Link::Connecting:
@@ -350,16 +350,22 @@ emoji::Look emoji_look(const UiModel& m) {
     case Link::Offline: return emoji::Look::Disconnected;
     case Link::Online: break;
   }
-  // The wake cue is her answering to her name, not reporting a reply: she waves the
-  // maracas instead of opening the speaking mouth (user, 2026-11-09).
-  if (m.wake_cue) return emoji::Look::Happy;
-  // The mouth has to match the sound: a named face waits for the playback to end.
-  if (m.screen == Screen::Responding && m.speaking) return emoji::Look::Speaking;
+  // The wake cue is her answering to her name, not reporting a reply: she says Hi
+  // (eyes grow, then rays) instead of opening the speaking mouth (user, 2026-11-09).
+  if (m.wake_cue) return emoji::Look::Hi;
   // A reminder speaks before the resting face does: the user has to act on it, and on a
-  // pure-emoji board this face is the only sign that anything happened.
+  // pure-emoji board this face is the only sign that anything happened. A blocking
+  // reminder also beats the reply mood and the speaking mouth — the turn cannot
+  // proceed until the user answers, so the "?" / "!!" must be visible even mid-reply.
   if (m.screen == Screen::Prompt) return emoji::Look::Silly;    // "?" — the host wants permission
   if (m.screen == Screen::Choice) return emoji::Look::Shocked;  // "!!" — the host needs a choice
-  if (m.done_cue) return emoji::Look::Happy;                    // maracas — the task finished
+  if (m.done_cue) return emoji::Look::Excited;                   // star eyes — a timer/task finished
+  // The reply's own mood: the reply wears its face while it is spoken, so a joke is
+  // laughed, not just spoken. It beats the generic wave below but not a blocking
+  // reminder above.
+  if (m.mood_set) return m.mood;
+  // The mouth has to match the sound: a named face waits for the playback to end.
+  if (m.screen == Screen::Responding && m.speaking) return emoji::Look::Speaking;
   // What the host named for this turn (the AI's read on the answer).
   if (m.look_set) return m.look;
   switch (m.screen) {
@@ -383,7 +389,10 @@ uint32_t emoji_anim_key(const UiModel& m) {
     case emoji::Look::Sleeping: return static_cast<uint32_t>(look) * 16 + (m.frame / 5) % 6;
     case emoji::Look::Connecting: return static_cast<uint32_t>(look) * 16 + (m.frame % 20);
     case emoji::Look::Speaking:
-      return static_cast<uint32_t>(look) * 16 + (m.frame % 20) + (m.level / 10) * 64;
+      // A fixed 20-frame wave: it does not follow the mic level (draw_speaking_bars
+      // ignores it — her own voice would be the only level on the board), so the
+      // level must not force irregular repaints here either.
+      return static_cast<uint32_t>(look) * 16 + (m.frame % 20);
     case emoji::Look::Sad:
     case emoji::Look::Cool:    // the sunglasses sway
     case emoji::Look::Happy:   // shaking maracas

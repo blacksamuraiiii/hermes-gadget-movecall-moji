@@ -556,10 +556,24 @@ class DeviceSession:
         async with self._send_lock:
             await self._ws.send(data)
 
-    async def send_reply(self, text: str, *, turn: str | None = None, interim: bool = False) -> None:
+    async def send_reply(self, text: str, *, turn: str | None = None, interim: bool = False,
+                       mood: str | None = None) -> None:
+        # A [mood:X] tag rides on the final reply only: streaming deltas can
+        # split the tag across chunks, so interim text passes through
+        # untouched and the final reply corrects the screen. An explicit mood
+        # (e.g. "silly" for an unusable reply) wins over a tag in the
+        # text; the tag is stripped either way, so it is never shown or read.
+        # Local import: tools imports this module (MAX_CARD_ITEMS), so a
+        # top-level import would be circular.
         if not interim:
+            from .tools import parse_mood_tag
+
+            text, tagged = parse_mood_tag(text)
+            if mood is None:
+                mood = tagged
             self.note(reply=text)
-        await self.send_json(protocol.message("reply", text=text, turn=turn, interim=interim or None))
+        await self.send_json(protocol.message("reply", text=text, turn=turn,
+                                              interim=interim or None, mood=mood))
 
     async def send_delta(self, text: str, *, turn: str | None = None) -> None:
         self.note(reply=text)

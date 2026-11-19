@@ -12,11 +12,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import re
 import threading
 from typing import Any
 
 from . import playback, runtime, textfmt
 from .hub import MAX_CARD_ITEMS, MAX_CHOICE_OPTIONS
+
+log = logging.getLogger("hermes_gadget.tools")
 
 TOOLSET = "gadget"
 CALL_TIMEOUT_S = 20.0
@@ -112,6 +116,58 @@ FACE_SCHEMA = {
         "required": ["look"],
     },
 }
+
+# The valid faces, from the schema's enum (one source of truth): gadget_face
+# rejects anything outside this set before it reaches the hub, so a typo never
+# travels to the device and silently becomes Neutral there.
+FACE_LOOKS = frozenset(FACE_SCHEMA["parameters"]["properties"]["look"]["enum"])
+
+# The reply-mood tag the gadget profile's LLM puts on a reply, e.g.
+# "[mood:laughing] 哈哈". The tag is stripped before the text reaches the
+# screen or the TTS, and the mood rides on the reply JSON instead, so the
+# device wears that face while the reply is spoken. Validated against the
+# same 20-name set as gadget_face (FACE_LOOKS): an unknown name is logged
+# loudly and dropped, never sent to the device (its firmware falls back to
+# Neutral for a name it does not know). "surprised" is accepted as an alias
+# for "shocked", the name the firmware uses.
+MOOD_TAG_RE = re.compile(r"\[mood:([A-Za-z_-]+)\]", re.IGNORECASE)
+MOOD_ALIASES = {"surprised": "shocked"}
+
+# The fallback for a truly empty final reply: the LLM returned nothing, so
+# there are no words and no mood tag to wear — except the silly face, whose
+# definition is "didn't catch that, please say it again", exactly what the
+# fallback text says. Tool-marker-only replies are NOT caught here: the new
+# formatter does not strip markers, so they are not empty.
+EMPTY_REPLY_FALLBACK_TEXT = "这条回复是空的，请再问一次。"
+EMPTY_REPLY_FALLBACK_MOOD = "silly"
+
+
+def empty_reply_fallback(text: str) -> tuple[str, str | None]:
+    """The (text, mood) for a finalized reply: the fallback pair when the
+    reply is empty or blank, the input unchanged with no mood otherwise."""
+    if not text.strip():
+        return EMPTY_REPLY_FALLBACK_TEXT, EMPTY_REPLY_FALLBACK_MOOD
+    return text, None
+
+
+def parse_mood_tag(text: str) -> tuple[str, str | None]:
+    """Split a reply's [mood:X] tag from its text.
+
+    Returns (text, mood): the text with every mood tag removed, and the mood
+    name (lowercase, alias-resolved) from the FIRST tag, or None when the
+    reply carries no tag. An unknown mood name is logged and dropped, not
+    passed on: the device must never be handed a name it cannot draw.
+    """
+    match = MOOD_TAG_RE.search(text)
+    if match is None:
+        return text, None
+    mood = MOOD_ALIASES.get(match.group(1).lower(), match.group(1).lower())
+    clean = MOOD_TAG_RE.sub("", text)
+    if mood not in FACE_LOOKS:
+        log.warning("unknown mood %r in reply tag; dropping it (valid: %s)",
+                    match.group(1), ", ".join(sorted(FACE_LOOKS)))
+        return clean, None
+    return clean, mood
 
 # The fork's weather tool (QWeather, plugin/weather.py): the upstream 0.6 tree kept weather.py but
 # lost the tool that called it, so the model fell back to searching the web for forecasts.
@@ -431,6 +487,13 @@ def gadget_ask(args: dict, **_kw) -> str:
 
 
 def gadget_face(args: dict, **_kw) -> str:
+    look = str(args.get("look") or "").strip().lower()
+    if not look:
+        return _error("look is required")
+    # Validate before touching the hub: an unknown name must fail loudly here,
+    # not travel to the device and silently become Neutral there.
+    if look not in FACE_LOOKS:
+        return _error(f"unknown face {look!r}; pick one of: {', '.join(sorted(FACE_LOOKS))}")
     adapter = _adapter()
     if adapter is None:
         return _error("gadget hub is not running in this process")
@@ -439,9 +502,6 @@ def gadget_face(args: dict, **_kw) -> str:
         return _error(err)
     if (err := _usable(session)):
         return _error(err)
-    look = str(args.get("look") or "").strip().lower()
-    if not look:
-        return _error("look is required")
     try:
         seconds = float(args.get("seconds", 8))
     except (TypeError, ValueError):

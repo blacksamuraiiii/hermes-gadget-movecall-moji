@@ -56,10 +56,17 @@ constexpr uint32_t kTurnTimeoutMs = 30 * 60000;   // ...once its turn.start says
 constexpr uint32_t kSettleAfterReplyMs = 6000;
 // A named face (`emote`) lasts this long unless the host says otherwise.
 constexpr uint32_t kEmoteMs = 8000;
-// How long the happy face stays up after a finished turn.
+// A cancel the user asked for (BOOT / Cancel) shows the XX face for this long.
+constexpr uint32_t kCancelFaceMs = 3000;
+// How long the done face stays up after a finished turn.
 constexpr uint32_t kDoneCueMs = 5000;
 // The resting rotation: a new calm face this often while she sits idle.
 constexpr uint32_t kIdleLookMs = 20000;
+// An idle hero gets bored before she sleeps: at 140 s the resting rotation stops and
+// the half-closed face stays up until 3 min, when Sleeping takes over. 140 s is a full
+// pool cycle first (7 looks x 20 s), so she sleeps only after the pool has run once.
+constexpr uint32_t kBoredAfterMs = 140000;
+constexpr uint32_t kSleepingAfterMs = 180000;
 // A command word fires repeatedly for as long as it is spoken: act on one every so often.
 constexpr uint32_t kWakeHitThrottleMs = 2000;
 // The screen lights at the hit, but the recording waits for the host's cue ("我在") to finish.
@@ -196,6 +203,10 @@ std::string latest_lines(const std::string& text, int cols) {
 }
 
 }  // namespace
+
+// The 20 faces, by name (defined below, beside h_emote): h_reply reads a reply's mood
+// through it before that definition.
+emoji::Look look_from_name(std::string_view name);
 
 const App::Route App::kRoutes[] = {
     {"challenge", &App::h_challenge},     {"welcome", &App::h_welcome},
@@ -1214,6 +1225,7 @@ void App::h_turn_start(const json::Value& m) {
   turn_done_ = false;
   turn_started_ = true;
   reply_final_ = false;
+  reply_mood_set_ = false;  // a new turn starts with no mood until its reply says so
   last_turn_rx_ = now();
   if (!recording_unsent()) {
     if (mode_ != Mode::Thinking) {
@@ -1322,6 +1334,14 @@ void App::h_reply(const json::Value& m) {
   }
   if (recording_unsent()) return;
   turn_takes_screen();
+  // The reply's own mood, if the host sent one with it. An unknown name is the host's
+  // bug, not the board's: look_from_name falls back to Neutral, and the plugin validates
+  // before sending, so this stays quiet.
+  const std::string& mood = m["mood"].as_string();
+  if (!mood.empty()) {
+    reply_mood_ = look_from_name(mood);
+    reply_mood_set_ = true;
+  }
   reply_ = text;
   reply_final_ = true;
   reply_unread_ = true;
@@ -1801,12 +1821,13 @@ void App::h_diag(const json::Value& m) {
   send(out);
 }
 
-// The resting rotation: eight calm faces, never the one already up.
+// The resting rotation: seven calm faces, never the one already up. Bored is not in
+// the pool: she gets bored on her own after 140 s idle (see update_model).
 emoji::Look App::pick_idle_look() {
   static constexpr emoji::Look kPool[] = {emoji::Look::Neutral, emoji::Look::Cool,
-                                          emoji::Look::Happy,   emoji::Look::Bored,
-                                          emoji::Look::Loving,  emoji::Look::Excited,
-                                          emoji::Look::Hi,      emoji::Look::Silly};
+                                          emoji::Look::Happy,   emoji::Look::Loving,
+                                          emoji::Look::Excited, emoji::Look::Hi,
+                                          emoji::Look::Silly};
   constexpr size_t kCount = sizeof(kPool) / sizeof(kPool[0]);
   uint8_t b = 0;
   hal_.system->random_bytes(&b, 1);
@@ -2257,6 +2278,15 @@ void App::cancel_listening(std::string_view why) {
   send(c);
   mode_ = Mode::Idle;
   mode_since_ = now();
+  // A cancel the user asked for (BOOT / Cancel) gets the XX face for a moment, so the
+  // stop is visible. Other reasons keep their own face: "no speech" is the host
+  // discarding a silent turn (upstream 0.6), and "too short" and "new session" say
+  // nothing on the face either.
+  if (why == "cancelled") {
+    named_look_ = emoji::Look::Disconnected;
+    named_look_until_ = now() + kCancelFaceMs;
+    update_model();
+  }
 }
 
 void App::go_home() {
@@ -2403,7 +2433,12 @@ void App::cancel_turn() {
   }
   mode_ = Mode::Idle;
   mode_since_ = now();
+  // The user stopped a reply or a thought mid-flight: XX eyes for a moment, so the
+  // stop is visible, then the resting face comes back.
+  named_look_ = emoji::Look::Disconnected;
+  named_look_until_ = now() + kCancelFaceMs;
   set_hint_flash(tr(i18n::Msg::Cancelled));
+  update_model();
 }
 
 void App::on_mic_samples(const int16_t* samples, size_t count) {
@@ -3007,8 +3042,8 @@ void App::update_model() {
   // The board's own face. face.set's four expressions become four of the twenty states, so
   // the AI's named face works on both channels; `emote` adds the other sixteen.
   m.emoji = profile_.emoji_face;
-  // A command word lit the screen and the host is answering with the cue: she waves the
-  // maracas rather than opening the speaking mouth, because that is a greeting.
+  // A command word lit the screen and the host is answering with the cue: she says Hi
+  // (eyes grow, then rays) rather than opening the speaking mouth, because that is a greeting.
   m.wake_cue = wake_awaiting_cue_;
   m.done_cue = done_until_ != 0 && static_cast<int32_t>(now() - done_until_) < 0;
   m.look = emoji::Look::Neutral;
@@ -3022,6 +3057,10 @@ void App::update_model() {
       m.look_set = true;
     }
   }
+  // The reply's mood only lives while the turn is in Responding: it is the face for
+  // this reply, and it ends with the turn (no ttl — a new turn clears it above).
+  m.mood_set = reply_mood_set_ && mode_ == Mode::Responding;
+  m.mood = reply_mood_;
   m.dash.clear();
   m.items.clear();
   m.card_progress = -1;
@@ -3421,19 +3460,29 @@ void App::update_model() {
   // The press guard counts from when the choice comes to the front (choice_armed).
   choice_front_ = m.screen == Screen::Choice;
   if (choice_front_ && !choice_was_front) choice_since_ = now();
-  // The resting rotation: eight calm faces, a new one every 20 s, never the one already up.
+  // The resting rotation: seven calm faces, a new one every 20 s, never the one already up.
   // Only while she is idle with nothing else to say — a cue, a face the host named or any
   // other screen owns the face otherwise. A still pair of eyes reads as a frozen screen.
+  // At 140 s idle the rotation stops and the half-closed face stays up; at 3 min she
+  // falls asleep, and only activity (which resets mode_since_) wakes the face.
   if (profile_.emoji_face && m.screen == Screen::Ready && mode_ == Mode::Idle && !speaking() &&
       !m.look_set && !m.done_cue && !m.wake_cue) {
     const uint32_t idle = now() - mode_since_;
-    if (!idle_look_set_ || idle < idle_look_at_ || idle - idle_look_at_ >= kIdleLookMs) {
-      idle_look_ = pick_idle_look();
-      idle_look_at_ = idle;
-      idle_look_set_ = true;
+    if (idle >= kSleepingAfterMs) {
+      m.look = emoji::Look::Sleeping;
+      m.look_set = true;
+    } else if (idle >= kBoredAfterMs) {
+      m.look = emoji::Look::Bored;
+      m.look_set = true;
+    } else {
+      if (!idle_look_set_ || idle < idle_look_at_ || idle - idle_look_at_ >= kIdleLookMs) {
+        idle_look_ = pick_idle_look();
+        idle_look_at_ = idle;
+        idle_look_set_ = true;
+      }
+      m.look = idle_look_;
+      m.look_set = true;
     }
-    m.look = idle_look_;
-    m.look_set = true;
   }
   if (!display_sleeping_) render(m);
 }

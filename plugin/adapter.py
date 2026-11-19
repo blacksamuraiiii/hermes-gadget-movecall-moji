@@ -71,6 +71,7 @@ from . import face as faces
 from .battery_log import BatteryLog
 from .hub import DeviceHub, DeviceSession, HubDelegate
 from .store import DeviceStore
+from .tools import empty_reply_fallback, parse_mood_tag
 
 logger = logging.getLogger(__name__)
 
@@ -1912,7 +1913,8 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
                 success=False, error="the gadget is in interpreter mode")
         turn = self._turns.get(session.device_id)
         if finalize:
-            await session.send_reply(text, turn=turn)
+            text, fallback_mood = empty_reply_fallback(text)
+            await session.send_reply(text, turn=turn, mood=fallback_mood)
         else:
             await session.send_delta(text, turn=turn)
         return SendResult(success=True, message_id=message_id)
@@ -2046,6 +2048,11 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
         queued speech: each file starts only once the device is idle, or not at all after that time.
         ``mode`` is the interpreter mode the text is a translation of, None for Hermes's own speech;
         nothing is played once the device's mode is another (see _play_file)."""
+        # The mood tag is screen metadata, not speech: strip it here too, or
+        # the voice would read "[mood:laughing]" aloud. This is the other
+        # synthesis path (queued speech and interpreter translations); the
+        # auto-TTS reply path strips it in prepare_tts_text instead.
+        text = parse_mood_tag(text or "")[0]
         if (refused := self._wrong_mode(chat_id, mode)):
             return refused  # before the synthesis, which would be for nobody
         paths: List[str] = []
@@ -2197,6 +2204,9 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
         identifier filter drops the numbers in a ``11/1℃`` range — all of which come out of
         the speaker as English words in the middle of a Chinese sentence.
         """
+        # The mood tag is screen metadata, not speech: strip it before the
+        # voice ever sees it. (The tag reaches the device through send_reply.)
+        text = parse_mood_tag(text or "")[0]
         text = textfmt.spoken_symbols(text)
         return super().prepare_tts_text(text)
 

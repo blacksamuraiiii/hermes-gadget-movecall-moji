@@ -572,6 +572,11 @@ class App {
   bool idle_look_set_ = false;
   emoji::Look named_look_ = emoji::Look::Neutral;
   uint32_t named_look_until_ = 0;
+  // The face for the reply now being spoken: the host sent a mood with the reply
+  // (see h_reply). It only lives while the turn is in Responding (see update_model) —
+  // no ttl to guess, the turn ends it.
+  emoji::Look reply_mood_ = emoji::Look::Neutral;
+  bool reply_mood_set_ = false;
   bool has_pending_look_ = false;
   emoji::Look pending_look_ = emoji::Look::Neutral;
   uint32_t pending_look_ms_ = 0;

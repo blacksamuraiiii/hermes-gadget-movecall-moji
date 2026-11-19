@@ -11009,6 +11009,38 @@ TEST("app: an idle pure-emoji board rotates its calm face") {
   CHECK(r.app.model().look == hg::emoji::Look::Cool);
 }
 
+// The idle progression: the pool runs a full cycle first (7 looks x 20 s), then she
+// gets bored at 140 s, then falls asleep at 3 min — and the rotation has stopped by
+// then, so the face stays put until activity wakes it.
+TEST("app: an idle pure-emoji board gets bored at 140 s, then sleeps at 3 min") {
+  hg::DeviceProfile emoji = Rig::profile("ws://hermes.local:8765/gadget");
+  emoji.emoji_face = true;
+  Rig r(emoji);
+  r.bring_online(true);
+  CHECK(r.app.screen() == hg::Screen::Ready);
+  // Ping to keep the session alive (three heartbeats at 20 s would otherwise time out).
+  for (int i = 0; i < 7; ++i) {
+    r.server(R"({"type":"ping","ts":1})");
+    r.advance(20000);
+  }
+  r.advance(2000);
+  // 140 s idle: bored, and the random rotation has stopped (the look is Bored, set).
+  CHECK(r.app.model().look == hg::emoji::Look::Bored);
+  CHECK(r.app.model().look_set);
+  for (int i = 0; i < 2; ++i) {
+    r.server(R"({"type":"ping","ts":1})");
+    r.advance(20000);
+  }
+  r.advance(2000);
+  // 3 min idle: sleeping takes over from bored.
+  CHECK(r.app.model().look == hg::emoji::Look::Sleeping);
+  CHECK(r.app.model().look_set);
+  // Still asleep 25 s later: the rotation does not resume on its own.
+  r.server(R"({"type":"ping","ts":1})");
+  r.advance(25000);
+  CHECK(r.app.model().look == hg::emoji::Look::Sleeping);
+}
+
 // The wake word: a hit tells the host which word fired, greets on screen, and only records
 // once the host's cue has had its moment. The cue itself is the host's audio, so the device
 // must not sit waiting for ever if it never comes.
@@ -11026,10 +11058,10 @@ TEST("app: a wake word asks for the cue, then records hands-free") {
   if (!hit) return;
   CHECK_EQ((*hit)["command"].as_int(), int64_t(0));
   CHECK_EQ((*hit)["score"].as_int(), int64_t(91));
-  // She greets with the maracas, and the screen is lit before any sound arrives.
+  // She greets with Hi, and the screen is lit before any sound arrives.
   CHECK(r.app.model().wake_cue);
   // What the glass shows: the cue outranks the resting rotation and the screen.
-  CHECK(hg::emoji_look(r.app.model()) == hg::emoji::Look::Happy);
+  CHECK(hg::emoji_look(r.app.model()) == hg::emoji::Look::Hi);
   CHECK(r.app.screen() == hg::Screen::Ready);
   CHECK(!r.fake.mic_on);
 
@@ -11043,4 +11075,114 @@ TEST("app: a wake word asks for the cue, then records hands-free") {
   const size_t before = r.fake.sent.size();
   r.app.on_wake_hit(1, 0.80f);
   CHECK(r.fake.sent.size() == before);
+}
+
+// Cancelling a recording or a reply shows the XX face for a moment, then lets it go.
+TEST("app: cancelling a recording or a reply shows the XX face, then lets it go") {
+  hg::DeviceProfile p = Rig::profile("ws://hermes.local:8765/gadget");
+  p.emoji_face = true;
+  Rig r(p);
+  r.fake.kv["talk_mode"] = "tap";
+  r.bring_online(true);
+  // Cancel a recording: hold Talk, then press Cancel — and let both go promptly,
+  // or the held pair reads as the local settings chord.
+  r.app.on_button(hg::Button::Talk, true);
+  r.advance(100);
+  CHECK(r.app.screen() == hg::Screen::Listening);
+  r.app.on_button(hg::Button::Cancel, true);
+  r.app.on_button(hg::Button::Cancel, false);
+  r.app.on_button(hg::Button::Talk, false);
+  r.advance(100);
+  CHECK(r.app.screen() == hg::Screen::Ready);
+  CHECK(r.app.model().look == hg::emoji::Look::Disconnected);
+  CHECK(r.app.model().look_set);
+  r.advance(3500);  // the Cancel face is a 3 s flash;
+                    // after it the resting rotation takes over again (never Disconnected)
+  CHECK(r.app.model().look != hg::emoji::Look::Disconnected);
+
+  // Cancel a reply the same way: BOOT/Cancel while Hermes is answering shows XX too.
+  r.server(R"({"type":"turn.start","turn":"t1"})");
+  r.server(R"({"type":"reply","turn":"t1","text":"Hello."})");
+  CHECK(r.app.screen() == hg::Screen::Responding);
+  r.app.on_button(hg::Button::Cancel, true);
+  r.app.on_button(hg::Button::Cancel, false);
+  r.advance(100);
+  CHECK(r.app.screen() == hg::Screen::Ready);
+  CHECK(r.app.model().look == hg::emoji::Look::Disconnected);
+  CHECK(r.app.model().look_set);
+  r.advance(3500);
+  CHECK(r.app.model().look != hg::emoji::Look::Disconnected);
+}
+
+// A turn with no speech is discarded, not mourned: upstream 0.6 gives it no face,
+// and neither does a cancel the user never asked for — only "cancelled" gets XX.
+TEST("app: a turn with no speech shows no cancel face") {
+  hg::DeviceProfile p = Rig::profile("ws://hermes.local:8765/gadget");
+  p.emoji_face = true;
+  Rig r(p);
+  r.fake.kv["talk_mode"] = "tap";
+  r.bring_online(true);
+  r.app.on_button(hg::Button::Talk, true);
+  r.app.on_button(hg::Button::Talk, false);
+  std::vector<int16_t> silence(1600, 20);  // 100 ms of a quiet room
+  for (int i = 0; i < 60 && r.fake.last("audio.cancel") == nullptr; ++i) {
+    r.app.on_mic_samples(silence.data(), silence.size());
+    r.advance(100);
+  }
+  const Value* cancel = r.fake.last("audio.cancel");
+  CHECK(cancel != nullptr);
+  if (!cancel) return;
+  CHECK_EQ((*cancel)["reason"].as_string(), std::string("no speech"));
+  CHECK(r.app.screen() == hg::Screen::Ready);
+  CHECK(r.app.model().look != hg::emoji::Look::Disconnected);
+}
+
+// A reply that carries a mood wears it while it plays, then drops it.
+TEST("app: a reply that carries a mood wears it while it plays, then drops it") {
+  hg::DeviceProfile p = Rig::profile("ws://hermes.local:8765/gadget");
+  p.emoji_face = true;
+  Rig r(p);
+  r.bring_online(true);
+  r.server(R"({"type":"turn.start","turn":"t1"})");
+  r.server(R"({"type":"reply","turn":"t1","text":"Ha!","mood":"laughing"})");
+  r.advance(100);
+  CHECK(r.app.screen() == hg::Screen::Responding);
+  CHECK(r.app.model().mood_set);
+  CHECK(r.app.model().mood == hg::emoji::Look::Laughing);
+  CHECK(hg::emoji_look(r.app.model()) == hg::emoji::Look::Laughing);
+  // The mood beats the generic speaking wave while the reply is playing.
+  r.server(R"({"type":"audio.start","stream":5,"rate":16000,"format":"pcm16"})");
+  r.advance(100);
+  CHECK(r.app.model().speaking);
+  CHECK(hg::emoji_look(r.app.model()) == hg::emoji::Look::Laughing);
+  // A new turn starts with no mood until its own reply says so, and a reply with
+  // no mood leaves the face unchanged (no stale mood).
+  r.server(R"({"type":"turn.start","turn":"t2"})");
+  r.advance(100);
+  CHECK(!r.app.model().mood_set);
+  r.server(R"({"type":"reply","turn":"t2","text":"Plain."})");
+  r.advance(100);
+  CHECK(!r.app.model().mood_set);
+  CHECK(hg::emoji_look(r.app.model()) != hg::emoji::Look::Laughing);
+}
+
+// A finished reply shows the excited face for a moment, then the resting face comes back.
+TEST("app: a finished reply shows the excited face for a moment") {
+  hg::DeviceProfile p = Rig::profile("ws://hermes.local:8765/gadget");
+  p.emoji_face = true;
+  Rig r(p);
+  r.bring_online(true);
+  r.server(R"({"type":"turn.start","turn":"t1"})");
+  r.server(R"({"type":"audio.start","stream":5,"rate":16000,"format":"pcm16"})");
+  r.server(R"({"type":"reply","turn":"t1","text":"Done."})");
+  r.advance(100);
+  CHECK(r.app.model().speaking);
+  r.server(R"({"type":"audio.end","stream":5})");
+  r.advance(200);
+  CHECK(!r.app.model().speaking);
+  CHECK(r.app.model().done_cue);
+  CHECK(hg::emoji_look(r.app.model()) == hg::emoji::Look::Excited);
+  r.advance(6000);  // past the 5 s done cue: the resting rotation comes back
+  CHECK(!r.app.model().done_cue);
+  CHECK(hg::emoji_look(r.app.model()) != hg::emoji::Look::Excited);
 }

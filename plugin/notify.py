@@ -49,7 +49,7 @@ KIND_CUES = {"approval": "approval", "sudo": "sudo", "clarify": "clarify"}
 
 # The face a reminder shows on a board that draws no text: its screen is the whole point, and a
 # spoken cue there would be a voice out of nowhere. approval and sudo share one cue.
-REMINDER_LOOKS = {"done": "happy", "approval": "silly", "sudo": "silly", "clarify": "shocked"}
+REMINDER_LOOKS = {"done": "excited", "approval": "silly", "sudo": "silly", "clarify": "shocked"}
 
 
 def look_for(cue: str) -> str:

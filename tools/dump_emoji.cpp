@@ -6,6 +6,7 @@
 
 #include "hg/canvas.hpp"
 #include "hg/emoji_face.hpp"
+#include "hg/face_pen.hpp"
 
 using Frame = std::vector<uint16_t>;
 
@@ -23,12 +24,27 @@ int main() {
       {"connecting", hg::emoji::Look::Connecting}, {"disconnected", hg::emoji::Look::Disconnected}};
   const uint16_t ink = hg::rgb565(232, 238, 242);
   const uint16_t bg = hg::rgb565(10, 14, 20);
+  const uint16_t ring_yellow = hg::rgb565(255, 205, 0);  // the connecting spinner
   constexpr int W = 240, H = 240;
   for (auto& l : looks) {
     for (uint32_t f = 0; f < 20; ++f) {
       Frame fb(static_cast<size_t>(W) * H, bg);
       hg::Canvas c(fb.data(), W, H, false);
       hg::emoji::draw(c, 20, 20, 200, l.look, f, 0, ink, bg);
+      if (l.look == hg::emoji::Look::Connecting) {
+        // The spinner is not part of the face: on the board Ui::draw_emoji draws it
+        // in the panel's own frame so it hugs the glass. The dump draws it the same
+        // way (same centre, radius, width and 18 deg/frame turn), or the GIF would
+        // show still eyes for a face that spins on screen.
+        // Geometry verified against firmware/core/src/ui.cpp Ui::draw_emoji
+        // (ring_colour rgb565(255,205,0), rbox = min(W,H)-6, arc centre (120,120),
+        // r=113, w=12, rot = frame*18 % 360, arc (300+rot)..(240+rot)).
+        const int rbox = W - 6;
+        hg::FacePen ring(c, (W - rbox) / 2, (H - rbox) / 2, rbox, ring_yellow, bg);
+        const int rot = static_cast<int>((f * 18) % 360);
+        ring.arc(120, 120, 113, 12, static_cast<float>((300 + rot) % 360),
+                 static_cast<float>((240 + rot) % 360), ring_yellow);
+      }
       char path[256];
       std::snprintf(path, sizeof(path), "/tmp/emoji-frames/%s-%02u.ppm", l.name, f);
       std::FILE* out = std::fopen(path, "wb");

@@ -192,7 +192,7 @@ def test_every_reminder_has_a_face_for_a_textless_board():
     assert set(notify.CUES) <= set(notify.REMINDER_LOOKS)
     assert set(notify.REMINDER_LOOKS.values()) <= known
     # The mapping the board actually gets, cue by cue.
-    assert notify.look_for("done") == "happy"
+    assert notify.look_for("done") == "excited"
     assert notify.look_for("approval") == "silly"
     assert notify.look_for("sudo") == "silly"
     assert notify.look_for("clarify") == "shocked"

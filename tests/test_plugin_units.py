@@ -611,3 +611,109 @@ def test_a_face_found_before_an_unpair_is_not_sent_after_it(tmp_path):
         return wire.sent
 
     assert asyncio.run(main()) == []
+
+
+# -- gadget_face -------------------------------------------------------------------------
+
+def test_gadget_face_rejects_an_unknown_look_before_touching_the_hub():
+    # An unknown name must fail loudly here, not travel to the device and silently
+    # become Neutral there. No hub is needed: the check runs before _adapter(), so
+    # this passes with no Hermes checkout. (A valid name goes on to _adapter(),
+    # which needs the gateway — that path is covered by the Hermes-dependent tests.)
+    from hermes_gadget_plugin import tools
+
+    out = json.loads(tools.gadget_face({"look": "not-a-face"}))
+    assert out["success"] is False
+    assert "unknown face" in out["error"]
+    assert "not-a-face" in out["error"]
+    # Case and whitespace are folded before the check: the error names the folded form.
+    out = json.loads(tools.gadget_face({"look": "  NOT-A-FACE  "}))
+    assert out["success"] is False
+    assert "unknown face 'not-a-face'" in out["error"]
+    assert json.loads(tools.gadget_face({"look": ""}))["error"] == "look is required"
+    assert json.loads(tools.gadget_face({}))["error"] == "look is required"
+    # The valid set is the schema's enum, all 20 names, one source of truth.
+    assert len(tools.FACE_LOOKS) == 20
+    assert tools.FACE_LOOKS == frozenset(
+        tools.FACE_SCHEMA["parameters"]["properties"]["look"]["enum"])
+
+
+# -- reply mood tag ------------------------------------------------------------------------
+
+def test_reply_mood_tag_is_stripped_and_the_mood_returned():
+    from hermes_gadget_plugin import tools
+
+    clean, mood = tools.parse_mood_tag("[mood:laughing] 哈哈")
+    assert mood == "laughing"
+    assert "[mood" not in clean and clean.strip() == "哈哈"
+    # No tag: the text is untouched and there is no mood.
+    assert tools.parse_mood_tag("你好") == ("你好", None)
+    # The name folds to lowercase; the first tag wins and every tag is stripped.
+    clean, mood = tools.parse_mood_tag("[mood:LAUGHING] 好 [mood:sad] 坏")
+    assert mood == "laughing"
+    assert "[mood" not in clean and clean.strip() == "好  坏"
+    # "surprised" is the LLM's word for the firmware's "shocked".
+    assert tools.parse_mood_tag("[mood:surprised] 哇")[1] == "shocked"
+
+
+def test_reply_mood_tag_with_an_unknown_name_warns_and_drops_it(caplog):
+    import logging
+
+    from hermes_gadget_plugin import tools
+
+    with caplog.at_level(logging.WARNING, logger="hermes_gadget.tools"):
+        clean, mood = tools.parse_mood_tag("[mood:flabbergasted] 哇")
+    assert mood is None
+    assert "[mood" not in clean and clean.strip() == "哇"
+    assert "unknown mood" in caplog.text and "flabbergasted" in caplog.text
+
+
+def test_send_reply_carries_the_mood_and_strips_the_tag():
+    import asyncio
+    import json
+
+    from hermes_gadget_plugin.hub import DeviceSession
+
+    class Recording:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, payload):
+            self.sent.append(payload)
+
+    ws = Recording()
+    # send_reply only talks to the websocket; the hub is never touched here.
+    session = DeviceSession(object(), ws, {"device_id": "d1"})
+    asyncio.run(session.send_reply("[mood:laughing] 哈哈", turn="t1"))
+    assert len(ws.sent) == 1
+    msg = json.loads(ws.sent[0])
+    assert msg == {"type": "reply", "text": " 哈哈", "turn": "t1", "mood": "laughing"}
+    # An interim reply passes the tag through untouched: deltas can split it,
+    # and the final reply corrects the screen.
+    ws.sent.clear()
+    asyncio.run(session.send_reply("[mood:laughing] 哈哈", turn="t1", interim=True))
+    msg = json.loads(ws.sent[0])
+    assert msg["text"] == "[mood:laughing] 哈哈" and "mood" not in msg
+    # No tag, no mood: the reply is exactly what it was before.
+    ws.sent.clear()
+    asyncio.run(session.send_reply("你好", turn="t1"))
+    msg = json.loads(ws.sent[0])
+    assert msg == {"type": "reply", "text": "你好", "turn": "t1"}
+    # An explicit mood wins over a tag in the text; the tag is still stripped.
+    ws.sent.clear()
+    asyncio.run(session.send_reply("[mood:happy] 对不起", turn="t1", mood="embarrassed"))
+    msg = json.loads(ws.sent[0])
+    assert msg["mood"] == "embarrassed" and "[mood" not in msg["text"]
+
+
+def test_empty_reply_falls_back_to_the_silly_face():
+    # The adapter module itself cannot be imported here (it needs the Hermes
+    # agent checkout, which this environment does not have), so the decision
+    # lives in tools.empty_reply_fallback and is tested there; edit_message
+    # calls it with the result. A truly empty final reply gets the fallback
+    # text and the silly face; anything else goes out untouched, moodless.
+    from hermes_gadget_plugin import tools
+
+    assert tools.empty_reply_fallback("") == ("这条回复是空的，请再问一次。", "silly")
+    assert tools.empty_reply_fallback("   ") == ("这条回复是空的，请再问一次。", "silly")
+    assert tools.empty_reply_fallback("你好") == ("你好", None)

@@ -169,19 +169,34 @@ TEST("emoji face: silly has a question mark") {
 // The neutral baseline below uses frame 0: the idle glance shifts the eyes sideways
 // on other frames, so "this area is empty" only holds where the glance is centred.
 TEST("emoji face: sleeping has U eyes and a T mouth, not bars") {
-  // The U eyes are bottom-half arcs at design (72, 78) and (145, 78), r=24 w=8:
-  // the ring reaches y 98..106 in design, which is canvas y 15+0.75*98 .. 15+0.75*106
-  // = 88.5..94.5. The T mouth now sits at design 142 (the GIF's 9 px gap was a
-  // quarter of the eyes' height on the 240 px glass; opened to 24).
+  // The U eyes are bottom-half arcs at design (72, 86) and (145, 86), r=22 w=8:
+  // the arc bottom lands at design y~112, canvas y 15+0.75*112 = 99. The T mouth
+  // bar is design (85-150, 139), w=25, top edge design y~127, canvas y~110.
+  // Measured from the GIF (xiaodou-1.gif frame 0): U bottom y~112, bar top y~128,
+  // a 16 px gap — this geometry is ~15 px, close to the GIF.
   const Frame sleeping = render(hg::emoji::Look::Sleeping);
   // Ink at the U bottom (canvas x~84 = design x 72, y~94) and none where the old bar was.
   CHECK(pixel(sleeping, 84, 94) == kInk);
   CHECK(count_rect(sleeping, kInk, 57, 111, 63, 117) == 0);
-  // The T mouth bar is design (85-150, 134), w=25. Between the two oval
+  // The T mouth bar is design (85-150, 139), w=25. Between the two oval
   // eyes (canvas x gap 103-120) the bar is the only ink: canvas x 106-117,
   // y 112-122.
   CHECK(count_rect(sleeping, kInk, 106, 112, 117, 122) > 10);
   CHECK(count_rect(render(hg::emoji::Look::Neutral, 0), kInk, 106, 112, 117, 122) == 0);
+  // The gap between the U bottom (canvas y~99) and the bar top (canvas y~110)
+  // is empty: canvas (84, 102) is design (72, 116), between the two.
+  CHECK(pixel(sleeping, 84, 102) == kBg);
+}
+
+TEST("emoji face: loving hearts are the GIF size, not enlarged") {
+  // The GIF hearts measure 32x30 px, which is s=20 (2*0.8s wide, 1.52s tall).
+  // At frame 10 the pulse is 1.0 and the bob is -4, so the left heart spans
+  // design y 94..124. Design (72, 130) is below the heart at s=20 (background)
+  // but inside it at s=30 (the old enlarged size): canvas (84, 112).
+  const Frame loving = render(hg::emoji::Look::Loving, 10);
+  CHECK(pixel(loving, 84, 112) == kBg);
+  // ...and the heart is really there: design (72, 113) is inside the triangle.
+  CHECK(pixel(loving, 84, 100) == hg::rgb565(247, 117, 146));
 }
 
 TEST("emoji face: happy has maracas and no heart") {
@@ -291,11 +306,13 @@ TEST("emoji face: every look fills the glass and stays inside it") {
       }
     }
     const int w = x1 - x0 + 1, h = y1 - y0 + 1;
-    // Measured over the 20 looks (frame 14, the 150 px test box): w 76..143, h 33..114.
-    // Floor of 70 and 30 keeps a look from collapsing into a few pixels — that is the
-    // failure mode "the GIF was drawn for a 100 px sheet" produced.
+    // Measured over the 20 looks (frame 14, the 150 px test box): w 76..143, h 22..114.
+    // The height floor is set by Loving: its GIF-size hearts are 32x30 design px,
+    // so the pair is only ~22 px tall on canvas. The floor guards against a look
+    // collapsing to a few pixels (an empty arc, a colour that never lands), not
+    // against a GIF-faithful small feature.
     CHECK(w >= 70);
-    CHECK(h >= 30);
+    CHECK(h >= 18);
     CHECK(x0 >= 0 && y0 >= 0 && x1 < kCanvas && y1 < kCanvas);
   }
 }
