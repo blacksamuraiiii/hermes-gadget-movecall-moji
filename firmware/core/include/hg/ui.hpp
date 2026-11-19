@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "hg/canvas.hpp"
+#include "hg/emoji_face.hpp"
 #include "hg/frame_stats.hpp"
 #include "hg/hal.hpp"
 #include "hg/i18n.hpp"
@@ -180,7 +181,27 @@ struct UiModel {
   std::string clock_time, clock_date;
   uint8_t clock_minute = 0;
   uint8_t clock_second = 0;
+  // The board draws 小墨's pure-emoji face (hg/emoji_face.hpp) over the whole panel instead
+  // of every other screen: eyes only, no header, no body, no hint row, no card. The link
+  // state is the face itself, so there is no lamp. See notes/设计-小墨纯表情.md.
+  bool emoji = false;
+  // A look the host named for this turn (`emote`, or `face.set` mapped onto the 20 states):
+  // what the AI thought the answer deserved. It outranks the screen's own face until it
+  // expires; what the board itself knows (the link, her own playback, a question waiting)
+  // still comes first. See emoji_look in ui.cpp for the whole order.
+  emoji::Look look = emoji::Look::Neutral;
+  bool look_set = false;
+  // The wake cue ("我在") is playing: she is answering to her name, not reporting a reply.
+  bool wake_cue = false;
+  // A turn just ended: the face says so for a moment, then the resting rotation resumes.
+  bool done_cue = false;
 };
+
+// The face a pure-emoji board shows for this model, and the step of its animation that makes
+// the next repaint: exposed so the priority order (what the board knows beats what the host
+// guessed) can be tested directly rather than through a screenshot.
+emoji::Look emoji_look(const UiModel& m);
+uint32_t emoji_anim_key(const UiModel& m);
 
 struct UiLayout {
   int scale = 1;  // base text scale
@@ -388,6 +409,8 @@ class Ui {
   void draw_clock(const UiModel& m);
   void draw_widget(const UiModel& m);
   void draw_battery_face(const UiModel& m);  // LowBattery, Charging, Charged
+  // A pure-emoji board's whole panel: the face and, while connecting, the spinner on the glass.
+  void draw_emoji(const UiModel& m);
   Display& display_;
   DisplayInfo panel_;
   DisplayInfo info_;
@@ -436,7 +459,7 @@ class Ui {
   // The screen that owns the whole panel right now, and the hash of what it drew.
   // Leaving it repaints everything (draw_frame); each face repaints when the flag
   // is not itself, so Clock -> Alarm -> Clock in one minute still redraws.
-  enum class FullFace : uint8_t { None, Alarm, Clock, Battery, Widget };
+  enum class FullFace : uint8_t { None, Alarm, Clock, Battery, Widget, Emoji };
   FullFace full_face_ = FullFace::None;
   uint32_t face_hash_ = 0;
 };

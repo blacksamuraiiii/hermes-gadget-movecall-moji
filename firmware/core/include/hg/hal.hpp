@@ -39,6 +39,14 @@ struct DisplayInfo {
   // An OLED/AMOLED panel: unlit pixels draw no power, so the background is
   // true black instead of the near-black used on backlit LCDs.
   bool emissive = false;
+  // The UI square on a round panel, in thousandths of the short side. The text
+  // screens keep the inscribed square (707) so lines stay off the corners; a board
+  // that draws no text (emoji_face) can use the whole circle (1000).
+  uint16_t round_area_permille = 707;
+  // A board with one key and no touch: no hint row at the bottom, and the header
+  // sits at the top edge instead of under the top band.
+  bool no_bottom_bar = false;
+  bool no_top_band = false;
 };
 
 // An RGB565 framebuffer owned by the port (PSRAM on hardware). On a board that

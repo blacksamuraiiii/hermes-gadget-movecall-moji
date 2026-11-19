@@ -501,6 +501,12 @@ class DeviceSession:
         return n if isinstance(n, int) and not isinstance(n, bool) and n > 0 else 0
 
     @property
+    def face(self) -> str:
+        """Which face the board draws (``caps.face``): ``"emoji"`` for a pure-emoji board, whose
+        whole screen is the face and carries no text at all, or ``"mascot"``."""
+        return str(self.caps.get("face") or "")
+
+    @property
     def card_items(self) -> int:
         """List rows a structured card may carry (``caps.card``), or 0 when the device draws plain cards only."""
         card = self.caps.get("card")
@@ -865,6 +871,12 @@ class DeviceSession:
                                    None if progress is None else max(0, min(100, int(progress))), qr)
         await self.send_json(protocol.message("display", title=title, body=body, ttl_s=ttl_s, **fields))
         return True
+
+    async def emote(self, look: str, ttl_s: float = 8) -> None:
+        """Name the face for this turn (the pure-emoji board's only screen). A text board draws its
+        own screens and ignores it, so callers check ``face`` first."""
+        await self.send_json(protocol.message("emote", look=look, ttl_s=ttl_s))
+
 
     def card_shown_as(self, *, items: list[str] | None = None, progress: int | None = None,
                       qr: str | None = None) -> str:

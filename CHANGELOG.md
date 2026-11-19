@@ -1,5 +1,41 @@
 # Changelog
 
+## moji-emoji-v2 (this fork)
+
+The pure-emoji line rebased onto upstream 0.6.0. 小墨's face is now drawn by the same
+renderer that upstream's cards, widgets and expressions live in, and nothing that needs a
+text screen is offered to the server any more.
+
+### Firmware
+
+- A pure-emoji board draws its face over the whole panel: no header, no body, no hint row,
+  no card. The look is decided in one place (`emoji_look`), in the order the board's own
+  knowledge deserves: the link, the wake cue, her own playback, a question waiting on the
+  user, the beat after a finished turn, the face the server named, then the screen. Six
+  tests pin that order.
+- `emote` names one of the twenty states. A face named while she is speaking waits for the
+  playback to end, so the mouth keeps matching the sound.
+- `face.set`'s four expressions land on four of the twenty states (happy, silly, shocked,
+  sleeping); `neutral` hands the face back to the screen.
+- Two layout knobs on `DisplayInfo` (`round_area_permille`, no top band, no bottom bar): the
+  face uses the whole circle instead of the text screens' inscribed square.
+- The board advertises `caps.face: "emoji"` and none of `caps.card`, `caps.choice`,
+  `caps.dashboard`, `caps.profiles`, `caps.interpret`: its screen carries no text for them.
+- The USB Serial/JTAG link is back on top of 0.6: SLIP frames on the console port, the
+  console still usable through the same reader, and the interrupt clean-up that 0.6 added to
+  its console path is repeated where the link installs the driver (a board that esptool has
+  talked to carries BUS_RESET enabled and restarts every 3.8 s without it).
+- No CJK table: a textless screen has no use for one, and the board's image is 1.5 MB of a
+  4 MB slot.
+
+### Plugin
+
+- `gadget_face` names a face by `emote`, so the agent can react on a screen that has no room
+  for words. It says so in its answer when a text board ignores the message.
+- `gadget_display`, `gadget_ask` and `gadget_interpret` refuse on such a board and tell the
+  model to say it in the reply instead, which is spoken: previously the card went out and
+  nothing appeared.
+
 ## Unreleased
 
 ## 0.6.0

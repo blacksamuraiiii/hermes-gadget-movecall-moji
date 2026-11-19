@@ -86,6 +86,33 @@ ASK_SCHEMA = {
     },
 }
 
+FACE_SCHEMA = {
+    "name": "gadget_face",
+    "description": "Show one of the gadget's 20 emoji faces for a few seconds. On a pure-emoji build "
+                   "(a device whose screen carries no text at all) this is the only way to react on "
+                   "screen, so pick the face that matches how the last answer felt to read. Optional: "
+                   "skip it when nothing stands out, and let the resting faces rotate.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "look": {
+                "type": "string",
+                "enum": ["neutral", "happy", "sad", "thinking", "sleeping", "listening", "speaking",
+                         "silly", "laughing", "loving", "angry", "shocked", "embarrassed", "winking",
+                         "excited", "bored", "cool", "hi", "connecting", "disconnected"],
+                "description": "Which face. happy=finished well, laughing=amused, loving=affection, "
+                               "excited=big win, sad=missed/unclear, angry=refused/bad, shocked=surprising, "
+                               "embarrassed=oops, winking=playful, silly=confused or cheeky, thinking=working "
+                               "it out, bored=waiting, cool=smug, hi=greeting, sleeping=goodnight.",
+            },
+            "seconds": {"type": "number",
+                        "description": "How long to hold it; default 8. 0 or less means 8."},
+            "device": _DEVICE_PARAM,
+        },
+        "required": ["look"],
+    },
+}
+
 ACTION_SCHEMA = {
     "name": "gadget_action",
     "description": "Invoke an action a gadget exposes (for example an LED, relay, buzzer, volume control or camera capture). "
@@ -269,6 +296,9 @@ def gadget_display(args: dict, **_kw) -> str:
         return _error(err)
     if (err := _usable(session)):
         return _error(err)
+    if session.face == "emoji":
+        return _error(f"{session.name}'s screen shows only faces and no text at all, so this cannot be "
+                      "shown. Say it in your reply instead — it is spoken — and use gadget_face to react.")
     text = textfmt.for_device(str(args.get("text") or ""), session.charset)
     title = textfmt.for_device(str(args.get("title") or ""), session.charset)
     cols = _row_cols(session)
@@ -325,6 +355,9 @@ def gadget_ask(args: dict, **_kw) -> str:
         return _error(err)
     if (err := _usable(session)):
         return _error(err)
+    if session.face == "emoji":
+        return _error(f"{session.name}'s screen shows only faces and no text at all, so this cannot be "
+                      "shown. Say it in your reply instead — it is spoken — and use gadget_face to react.")
     # In interpreter mode whoever holds the gadget may not be its owner: their tap is not an answer.
     if getattr(adapter, "interpreting", lambda _device_id: None)(session.device_id) is not None:
         return _error(f"{session.name} is in interpreter mode and takes no questions; ask in another chat, "
@@ -373,6 +406,37 @@ def gadget_ask(args: dict, **_kw) -> str:
     if index is None:
         return json.dumps({"success": True, "device": session.name, "cancelled": True, **seen})
     return json.dumps({"success": True, "device": session.name, "answer": str(given[index]), "index": index, **seen})
+
+
+def gadget_face(args: dict, **_kw) -> str:
+    adapter = _adapter()
+    if adapter is None:
+        return _error("gadget hub is not running in this process")
+    session, err = _resolve(adapter, args.get("device"))
+    if err:
+        return _error(err)
+    if (err := _usable(session)):
+        return _error(err)
+    look = str(args.get("look") or "").strip().lower()
+    if not look:
+        return _error("look is required")
+    try:
+        seconds = float(args.get("seconds", 8))
+    except (TypeError, ValueError):
+        seconds = 8.0
+    if seconds <= 0:
+        seconds = 8.0
+    try:
+        _run(adapter, session.emote(look, seconds))
+    except Exception as exc:  # noqa: BLE001 - surfaced to the model as text
+        return _error(f"could not reach {session.name}: {exc}")
+    result = {"success": True, "device": session.name, "look": look, "shown_for_s": seconds}
+    face = session.face
+    if face and face != "emoji":
+        # The message went out, but a text board draws its own screens and ignores it.
+        result["not_shown"] = (f"{session.name} draws a {face} face, not the pure-emoji set; "
+                               "the emote was sent and ignored")
+    return json.dumps(result)
 
 
 def gadget_action(args: dict, **_kw) -> str:
@@ -520,6 +584,9 @@ def gadget_interpret(args: dict, **_kw) -> str:
         return _error(err)
     if (err := _usable(session)):
         return _error(err)
+    if session.face == "emoji":
+        return _error(f"{session.name}'s screen shows only faces and no text at all, so this cannot be "
+                      "shown. Say it in your reply instead — it is spoken — and use gadget_face to react.")
     try:
         if args.get("stop"):
             was_on = _run(adapter, adapter.interpret_stop(session.device_id))
@@ -551,6 +618,7 @@ def register_tools(ctx) -> None:
     for schema, handler, emoji in (
         (DEVICES_SCHEMA, gadget_devices, "📟"),
         (DISPLAY_SCHEMA, gadget_display, "🖥️"),
+        (FACE_SCHEMA, gadget_face, "😶"),
         (ASK_SCHEMA, gadget_ask, "🔘"),
         (ACTION_SCHEMA, gadget_action, "🎛️"),
         (PLAY_SCHEMA, gadget_play, "🔊"),

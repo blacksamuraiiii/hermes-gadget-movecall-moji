@@ -59,6 +59,13 @@ int run(int argc, char** argv) {
 }  // namespace
 
 void begin() {
+#if CONFIG_HG_LINK_USB_SERIAL
+  // The USB link's reader owns stdin and runs whole lines through esp_console_run(), so the
+  // commands must exist without a REPL of their own.
+  esp_console_config_t link_cfg = ESP_CONSOLE_CONFIG_DEFAULT();
+  link_cfg.max_cmdline_length = 256;
+  ESP_ERROR_CHECK(esp_console_init(&link_cfg));
+#endif
   static const char* const kCommands[] = {"help",      "status", "diag",   "get",         "set",       "say",       "camera",
                                           "talk",      "release", "cancel", "new-session", "reconnect", "forget-key",
                                           "factory-reset", "settings", "wifi-setup", "wifi", "phone", "perf", "log", "face", "choose"};
@@ -69,6 +76,10 @@ void begin() {
     cmd.func = &run;
     esp_console_cmd_register(&cmd);
   }
+#if CONFIG_HG_LINK_USB_SERIAL
+  ESP_LOGI(TAG, "console ready over the USB link (type: help)");
+  return;
+#endif
   esp_console_repl_t* repl = nullptr;
   esp_console_repl_config_t repl_cfg = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
   repl_cfg.prompt = "gadget>";

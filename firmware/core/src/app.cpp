@@ -53,6 +53,12 @@ constexpr uint32_t kMinUtteranceMs = 350;
 constexpr uint32_t kThinkingTimeoutMs = 180000;  // no word from Hermes after a request
 constexpr uint32_t kTurnTimeoutMs = 30 * 60000;   // ...once its turn.start says it is working
 constexpr uint32_t kSettleAfterReplyMs = 6000;
+// A named face (`emote`) lasts this long unless the host says otherwise.
+constexpr uint32_t kEmoteMs = 8000;
+// How long the happy face stays up after a finished turn.
+constexpr uint32_t kDoneCueMs = 5000;
+// The resting rotation: a new calm face this often while she sits idle.
+constexpr uint32_t kIdleLookMs = 20000;
 constexpr uint32_t kNewSessionHoldMs = 2000;  // hold CANCEL this long to start a new session
 constexpr uint32_t kNewSessionHintMs = 600;   // ...and show the countdown after this long
 constexpr uint32_t kPromptArmMs = 600;        // presses this soon after a question appears don't answer it
@@ -198,7 +204,7 @@ const App::Route App::kRoutes[] = {
     {"action", &App::h_action},           {"ping", &App::h_ping},
     {"notice", &App::h_notice},           {"error", &App::h_error},
     {"transcript", &App::h_transcript},   {"prompt", &App::h_prompt},
-    {"prompt.close", &App::h_prompt_close}, {"ota.offer", &App::h_ota_offer},
+    {"prompt.close", &App::h_prompt_close}, {"emote", &App::h_emote}, {"ota.offer", &App::h_ota_offer},
     {"choice", &App::h_choice},           {"choice.close", &App::h_choice_close},
     {"interpret", &App::h_interpret},
     {"ota.begin", &App::h_ota_begin},     {"ota.end", &App::h_ota_end},
@@ -668,12 +674,17 @@ void App::send_hello() {
   if (profile_.has_scroll_buttons) inputs.push("up").push("down");
   caps.set("inputs", inputs);
   caps.set("talk_mode", talk_mode_ == TalkMode::Tap ? "tap" : "hold");
-  if (ui_ && can_open_dashboard()) {
+  // A pure-emoji board draws no text at all, so it must not advertise a single thing the
+  // host would have to put words on screen for: cards, choices, the dashboard, the widget
+  // pages, profiles, interpreter. They fall back to speech, which this board has.
+  const bool text_ui = ui_ && !profile_.emoji_face;
+  caps.set("face", profile_.emoji_face ? "emoji" : "mascot");
+  if (text_ui && can_open_dashboard()) {
     json::Value dash = json::Value::object();
     dash.set("v", can_page_widgets() ? kDashboardVersion : 1).set("rows", ui_->dash_rows());
     caps.set("dashboard", dash);
   }
-  if (ui_) {
+  if (text_ui) {
     // Structured cards (lists, progress, codes) and, where the board can pick a row, choices.
     json::Value card = json::Value::object();
     card.set("v", kCardVersion).set("items", static_cast<int>(kCardMaxItems));
@@ -687,8 +698,10 @@ void App::send_hello() {
       caps.set("choice", choice);
     }
   }
-  caps.set("profiles", true);
-  if (ui_) caps.set("interpret", 1);  // it draws the mode; a device without a screen has nothing to draw
+  if (text_ui) {
+    caps.set("profiles", true);
+    caps.set("interpret", 1);  // it draws the mode; a device without a screen has nothing to draw
+  }
   if (ui_ && profile_.faces) {
     json::Value colour = json::Value::object().set("v", 2).set("px", colour_px_);
     if (colour_bands_) colour.set("frames", true);
@@ -1779,6 +1792,80 @@ void App::h_diag(const json::Value& m) {
   send(out);
 }
 
+// The resting rotation: eight calm faces, never the one already up.
+emoji::Look App::pick_idle_look() {
+  static constexpr emoji::Look kPool[] = {emoji::Look::Neutral, emoji::Look::Cool,
+                                          emoji::Look::Happy,   emoji::Look::Bored,
+                                          emoji::Look::Loving,  emoji::Look::Excited,
+                                          emoji::Look::Hi,      emoji::Look::Silly};
+  constexpr size_t kCount = sizeof(kPool) / sizeof(kPool[0]);
+  uint8_t b = 0;
+  hal_.system->random_bytes(&b, 1);
+  emoji::Look pick = kPool[b % kCount];
+  if (pick == idle_look_) pick = kPool[(b + 1) % kCount];
+  return pick;
+}
+
+// The 20 faces, by the names the host and README_emoji.md use (`emote`), and the four
+// expressions face.set allows, mapped onto them: one face for the AI, whichever channel it
+// came in on. An unknown name draws Neutral rather than nothing.
+emoji::Look look_from_name(std::string_view name) {
+  struct Pair {
+    std::string_view name;
+    emoji::Look look;
+  };
+  static constexpr Pair kPairs[] = {
+      {"neutral", emoji::Look::Neutral},         {"happy", emoji::Look::Happy},
+      {"sad", emoji::Look::Sad},                 {"thinking", emoji::Look::Thinking},
+      {"sleeping", emoji::Look::Sleeping},       {"listening", emoji::Look::Listening},
+      {"speaking", emoji::Look::Speaking},       {"silly", emoji::Look::Silly},
+      {"laughing", emoji::Look::Laughing},       {"loving", emoji::Look::Loving},
+      {"angry", emoji::Look::Angry},             {"shocked", emoji::Look::Shocked},
+      {"embarrassed", emoji::Look::Embarrassed}, {"winking", emoji::Look::Winking},
+      {"excited", emoji::Look::Excited},         {"bored", emoji::Look::Bored},
+      {"cool", emoji::Look::Cool},               {"hi", emoji::Look::Hi},
+      {"connecting", emoji::Look::Connecting},   {"disconnected", emoji::Look::Disconnected}};
+  for (const auto& p : kPairs) {
+    if (p.name == name) return p.look;
+  }
+  return emoji::Look::Neutral;
+}
+
+emoji::Look look_for_expression(mascot::Expression e) {
+  switch (e) {
+    case mascot::Expression::Happy: return emoji::Look::Happy;
+    // The two differ only in the right eye, and Silly's "<" reads better as "?" on a face
+    // with no words beside it (notes/设计-小墨纯表情.md).
+    case mascot::Expression::Confused: return emoji::Look::Silly;
+    case mascot::Expression::Alert: return emoji::Look::Shocked;
+    case mascot::Expression::Sleepy: return emoji::Look::Sleeping;
+    case mascot::Expression::Neutral: break;
+  }
+  return emoji::Look::Neutral;
+}
+
+// A look the host named for this turn (`emote`). Its time is what the face has left; while
+// she is speaking the mouth belongs to the sound, so the face waits for the playback to end
+// and then takes its full time (App::tick).
+void App::h_emote(const json::Value& m) {
+  const std::string& name = m["look"].as_string();
+  if (name.empty()) return;
+  double ttl = m["ttl_s"].as_number(kEmoteMs / 1000.0);
+  if (ttl <= 0) ttl = kEmoteMs / 1000.0;
+  const auto ttl_ms = static_cast<uint32_t>(ttl * 1000);
+  if (speaking()) {
+    pending_look_ = look_from_name(name);
+    pending_look_ms_ = ttl_ms;
+    has_pending_look_ = true;
+    wake_display();
+    return;
+  }
+  named_look_ = look_from_name(name);
+  named_look_until_ = now() + ttl_ms;
+  wake_display();
+  update_model();
+}
+
 void App::h_notice(const json::Value& m) {
   notice_ = m["text"].as_string();
   double ttl = m["ttl_s"].as_number(8);
@@ -2641,6 +2728,23 @@ void App::h_ota_abort(const json::Value&) {
 
 void App::tick() {
   const uint32_t t = now();
+  // A face the host named while she was speaking waits for the playback to end, then takes
+  // its full time (h_emote): the mouth has to match the sound.
+  if (has_pending_look_ && !speaking()) {
+    named_look_ = pending_look_;
+    named_look_until_ = t + pending_look_ms_;
+    has_pending_look_ = false;
+    update_model();
+  }
+  // A turn that just finished playing: the emoji face says "done" for a moment.
+  if (profile_.emoji_face) {
+    const bool talking = speaking();
+    if (was_speaking_ && !talking) {
+      done_until_ = t + kDoneCueMs;
+      update_model();
+    }
+    was_speaking_ = talking;
+  }
   power_tick();
   motion_tick();
   clock_tick();
@@ -2833,6 +2937,22 @@ void App::update_model() {
   m.face = face_ ? &*face_ : nullptr;
   m.expression = expression_now();
   m.expression_still = expression_still();
+  // The board's own face. face.set's four expressions become four of the twenty states, so
+  // the AI's named face works on both channels; `emote` adds the other sixteen.
+  m.emoji = profile_.emoji_face;
+  m.wake_cue = false;  // the wake word is not ported yet (notes/合并-上游0.6.md, step 7)
+  m.done_cue = done_until_ != 0 && static_cast<int32_t>(now() - done_until_) < 0;
+  m.look = emoji::Look::Neutral;
+  m.look_set = false;
+  if (profile_.emoji_face) {
+    if (named_look_until_ != 0 && static_cast<int32_t>(now() - named_look_until_) < 0) {
+      m.look = named_look_;
+      m.look_set = true;
+    } else if (m.expression != mascot::Expression::Neutral) {
+      m.look = look_for_expression(m.expression);
+      m.look_set = true;
+    }
+  }
   m.dash.clear();
   m.items.clear();
   m.card_progress = -1;
@@ -3232,6 +3352,20 @@ void App::update_model() {
   // The press guard counts from when the choice comes to the front (choice_armed).
   choice_front_ = m.screen == Screen::Choice;
   if (choice_front_ && !choice_was_front) choice_since_ = now();
+  // The resting rotation: eight calm faces, a new one every 20 s, never the one already up.
+  // Only while she is idle with nothing else to say — a cue, a face the host named or any
+  // other screen owns the face otherwise. A still pair of eyes reads as a frozen screen.
+  if (profile_.emoji_face && m.screen == Screen::Ready && mode_ == Mode::Idle && !speaking() &&
+      !m.look_set && !m.done_cue) {
+    const uint32_t idle = now() - mode_since_;
+    if (!idle_look_set_ || idle < idle_look_at_ || idle - idle_look_at_ >= kIdleLookMs) {
+      idle_look_ = pick_idle_look();
+      idle_look_at_ = idle;
+      idle_look_set_ = true;
+    }
+    m.look = idle_look_;
+    m.look_set = true;
+  }
   if (!display_sleeping_) render(m);
 }
 

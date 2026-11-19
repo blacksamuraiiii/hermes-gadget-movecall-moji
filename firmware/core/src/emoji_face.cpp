@@ -40,10 +40,11 @@ constexpr uint16_t kZz = rgb565(170, 170, 190);        // the sleeping Z
 // The face is drawn a little larger than the box the hero layout hands us: the
 // design frame is 240 px square and the artwork fills most of it, so 1.2 lands
 // the connecting ring just inside the box. Overridable so a preview can compare.
-#ifndef HG_EMOJI_ZOOM
-#define HG_EMOJI_ZOOM 1.2f
-#endif
+#ifdef HG_EMOJI_ZOOM
 constexpr float kZoom = HG_EMOJI_ZOOM;
+#else
+constexpr float kZoom = kDrawScale;
+#endif
 
 constexpr float kPi = 3.14159265f;
 

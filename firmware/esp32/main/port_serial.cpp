@@ -26,6 +26,7 @@
 
 #include "driver/usb_serial_jtag.h"
 #include "esp_console.h"
+#include "hal/usb_serial_jtag_ll.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -156,8 +157,21 @@ bool SerialLink::begin() {
   usb_serial_jtag_driver_config_t cfg = {};
   cfg.rx_buffer_size = 8192;
   cfg.tx_buffer_size = 4096;
-  // The console already drives this peripheral; installing the driver on it is
-  // still allowed and is what gives us read access.
+  // The console already drives this peripheral; installing the driver on it is still
+  // allowed and is what gives us read access. A build without a console REPL skips the
+  // interrupt clean-up port_console.cpp does, so do it here: the block keeps its enables
+  // through a software reset, and one bit nothing handles (BUS_RESET, after esptool talked
+  // to the board) restarts the chip every 3.8 s from the interrupt watchdog inside the
+  // install below (upstream #308).
+  constexpr uint32_t kDriverInterrupts = USB_SERIAL_JTAG_INTR_SERIAL_OUT_RECV_PKT |
+                                        USB_SERIAL_JTAG_INTR_SERIAL_IN_EMPTY;
+  const uint32_t enabled = usb_serial_jtag_ll_get_intr_ena_status();
+  if (enabled & ~kDriverInterrupts) {
+    ESP_LOGW(TAG, "usb serial/jtag had interrupts enabled that nothing handles (int_ena 0x%04x); disabling them",
+             static_cast<unsigned>(enabled));
+  }
+  usb_serial_jtag_ll_disable_intr_mask(~kDriverInterrupts);
+  usb_serial_jtag_ll_clr_intsts_mask(~kDriverInterrupts);
   const esp_err_t err = usb_serial_jtag_driver_install(&cfg);
   if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
     ESP_LOGE(TAG, "usb_serial_jtag_driver_install: %s", esp_err_to_name(err));

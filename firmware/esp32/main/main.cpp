@@ -50,7 +50,11 @@ bool enable_p4_vdd_io_rail() {
 
 hgp::EspSystem g_system;
 hgp::NvsStorage g_storage;
+#if CONFIG_HG_LINK_USB_SERIAL
+hgp::SerialLink g_transport;  // the cable is the link (port_serial.cpp)
+#else
 hgp::WsTransport g_transport;
+#endif
 hgp::SpiDisplay g_display;
 #if CONFIG_HG_BOARD_CARDPUTER_ADV
 hg::CardputerCompose g_compose(g_display);
@@ -279,21 +283,38 @@ void dispatch(hg::App& app, hgp::Event& ev) {
   if (stale) return;
   switch (ev.type) {
     case EventType::NetUp:
+#if !CONFIG_HG_LINK_USB_SERIAL
       g_wifi.connected(app);
+#endif
       app.on_network(true, text ? text : "");
+#if !CONFIG_HG_LINK_USB_SERIAL
+      // There is no IP over the cable, so nothing to sync the clock from and no tailnet.
       g_time.set_network(true);
 #if !CONFIG_HG_BOARD_ESP32_CYD
       g_tailnet.network_up();
 #endif
+#endif
       break;
     case EventType::NetDown:
+#if CONFIG_HG_LINK_USB_SERIAL
+      // The Wi-Fi driver reports NetDown whenever it has no network, and on this build it
+      // has none by design. The cable is the network; SerialLink reports its own loss
+      // through WsClosed.
+      break;
+#else
       app.on_network(false, text ? text : "");
       g_time.set_network(false);
 #if !CONFIG_HG_BOARD_ESP32_CYD
       g_tailnet.network_down();
 #endif
       break;
+#endif
     case EventType::WifiDisconnected:
+#if CONFIG_HG_LINK_USB_SERIAL
+      // Wi-Fi still runs, because the radio is the entropy source for the device key, but it
+      // has no session to lose: its disconnect must not undo the link's NetUp.
+      break;
+#else
       g_wifi.disconnected();
       app.on_network(false, text ? text : "");
       g_time.set_network(false);
@@ -301,6 +322,7 @@ void dispatch(hg::App& app, hgp::Event& ev) {
       g_tailnet.network_down();
 #endif
       break;
+#endif
     case EventType::WifiStarted: g_wifi.reconfigure(); break;
     case EventType::WifiScanDone: g_wifi.scan_done(); break;
     case EventType::WifiProvision:
@@ -415,6 +437,11 @@ extern "C" void app_main(void) {
 
   // Wi-Fi first: the radio is the entropy source for the device key.
   g_wifi.begin(g_storage);
+#if CONFIG_HG_LINK_USB_SERIAL
+  // The cable is the link, so its reader must be up before the app asks to connect. Wi-Fi
+  // stays started: it still hands out the device key.
+  if (!g_transport.begin()) ESP_LOGE(TAG, "the USB link did not start; the device stays offline");
+#endif
 
   hg::Hal hal;
   hal.system = &g_system;
@@ -616,6 +643,9 @@ extern "C" void app_main(void) {
   profile.talk_key = board.buttons.talk >= 0;
   profile.talk_label = board.talk_label;
   profile.cancel_label = board.cancel_label;
+  // The board's own face: the pure-emoji renderer draws it, and the caps stop offering
+  // anything the host would have to put words on the screen for.
+  profile.emoji_face = board.emoji_face;
 #if CONFIG_HG_BOARD_CARDPUTER_ADV
   profile.has_cancel_button = keyboard;
   profile.has_scroll_buttons = keyboard;

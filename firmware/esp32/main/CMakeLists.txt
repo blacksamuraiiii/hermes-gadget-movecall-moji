@@ -53,6 +53,7 @@ idf_component_register(
         "port_stopwatch.cpp"
         "port_tca9554.cpp"
         "port_console.cpp"
+        "port_serial.cpp"
         "port_dac.cpp"
         "port_diag.cpp"
         "port_display.cpp"

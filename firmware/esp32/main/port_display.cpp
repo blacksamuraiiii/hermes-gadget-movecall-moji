@@ -372,6 +372,10 @@ hg::DisplayInfo SpiDisplay::info() const {
   di.round = cfg_.round;
   di.font_scale = cfg_.font_scale;
   di.mascot_px = cfg_.mascot_px;
+  // A pure-emoji board has no text to keep off the round corners and no hint row.
+  di.round_area_permille = cfg_.round_area_permille;
+  di.no_top_band = cfg_.no_top_band;
+  di.no_bottom_bar = cfg_.no_bottom_bar;
   return di;
 }
 

@@ -1,5 +1,22 @@
 menu "Hermes Gadget"
 
+    config HG_LINK_USB_SERIAL
+        bool "Use the USB Serial/JTAG port as the link (no Wi-Fi needed)"
+        default n
+        help
+            Send messages to the host as SLIP frames on the same USB port the console log
+            uses, and run tools/usb_relay.py on the host to bridge them to the Hermes
+            plugin. The device needs no IP address and the console keeps working. Off:
+            the WebSocket-over-Wi-Fi transport.
+
+    config HG_LINK_USB_PATH
+        string "WebSocket path the relay connects to"
+        default "/gadget"
+        depends on HG_LINK_USB_SERIAL
+        help
+            The path the relay asks the plugin for. The host and port come from the relay's
+            --target.
+
     menu "Defaults (overridable from the serial console)"
         config HG_DEFAULT_NAME
             string "Device name"

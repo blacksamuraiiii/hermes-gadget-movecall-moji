@@ -36,7 +36,14 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions-moji.csv"
 # CJK table (HG_CORE_FONT_CJK is a CMake option, off by default). The mascot
 # bitmaps that every v0.6 image links are simply never drawn here.
 
-# Wake word and the USB transport are this fork's own work and are re-ported in
-# later steps; until then the board boots with the Wi-Fi link and the BOOT key.
+# Wake word is this fork's own work and is re-ported in a later step; until then the board
+# boots with the BOOT key alone.
 # CONFIG_HG_WAKE_MULTINET
-# CONFIG_HG_LINK_USB_SERIAL
+# The link is the USB cable: SLIP frames on the console port, bridged to the plugin by
+# tools/usb_relay.py. No Wi-Fi session, no IP address, and the console keeps working through
+# the same reader. Comment both lines out to go back to WebSocket-over-Wi-Fi.
+CONFIG_HG_LINK_USB_SERIAL=y
+CONFIG_HG_LINK_USB_PATH="/gadget"
+# The relay ignores the host and uses only the path, so this placeholder is enough; it also
+# survives an NVS erase (the Web Serial installer wipes it).
+CONFIG_HG_DEFAULT_SERVER_URL="ws://usb/gadget"

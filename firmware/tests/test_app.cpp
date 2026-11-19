@@ -10902,3 +10902,104 @@ TEST("interpret: an owner's notice and working-state phrase are gone when the mo
   CHECK(r.app.model().detail.find("bank") == std::string::npos);
   CHECK(r.app.model().body.find("bank") == std::string::npos);
 }
+
+// The pure-emoji board (BoardConfig::emoji_face) draws one face instead of every screen, so
+// it must not ask Hermes for anything it would have to put words on the glass for.
+TEST("app: a pure-emoji board announces its face and no text caps") {
+  hg::DeviceProfile emoji = Rig::profile("ws://hermes.local:8765/gadget");
+  emoji.emoji_face = true;
+  Rig r(emoji);
+  r.app.begin();
+  r.app.on_network(true);
+  r.advance(1000);
+  r.app.on_transport_open();
+  const Value* hello = r.fake.last("hello");
+  CHECK(hello != nullptr);
+  if (!hello) return;
+  const Value& caps = (*hello)["caps"];
+  CHECK_EQ(caps["face"].as_string(), std::string("emoji"));
+  // Everything below needs a text screen to be useful; the board has none, so the host
+  // falls back to speaking them.
+  CHECK(caps["card"].is_null());
+  CHECK(caps["choice"].is_null());
+  CHECK(caps["dashboard"].is_null());
+  CHECK(caps["profiles"].is_null());
+  CHECK(caps["interpret"].is_null());
+  // face.set still reaches it, mapped onto the twenty states.
+  bool has_face_set = false;
+  for (const auto& a : (*hello)["actions"].elements()) has_face_set |= a["name"].as_string() == "face.set";
+  CHECK(has_face_set);
+
+  Rig text;  // a board with text keeps all of them
+  text.app.begin();
+  text.app.on_network(true);
+  text.advance(1000);
+  text.app.on_transport_open();
+  const Value* other = text.fake.last("hello");
+  CHECK(other != nullptr);
+  if (!other) return;
+  CHECK_EQ((*other)["caps"]["face"].as_string(), std::string("mascot"));
+  CHECK((*other)["caps"]["card"].is_object());
+  CHECK((*other)["caps"]["profiles"].as_bool());
+}
+
+TEST("app: the emote message names the face for a while") {
+  hg::DeviceProfile emoji = Rig::profile("ws://hermes.local:8765/gadget");
+  emoji.emoji_face = true;
+  Rig r(emoji);
+  r.app.begin();
+  r.app.on_network(true);
+  r.advance(1000);
+  r.app.on_transport_open();
+  CHECK(!r.app.model().look_set);
+  r.server(R"({"type":"emote","look":"loving","ttl_s":8})");
+  CHECK(r.app.model().look_set);
+  CHECK(r.app.model().look == hg::emoji::Look::Loving);
+  r.advance(9000);  // past its 8 s
+  CHECK(!r.app.model().look_set);
+  // An unknown name is the resting face, not the last one left up.
+  r.server(R"({"type":"emote","look":"no-such-face","ttl_s":8})");
+  CHECK(r.app.model().look_set);
+  CHECK(r.app.model().look == hg::emoji::Look::Neutral);
+}
+
+TEST("app: face.set puts its expression on the pure-emoji face") {
+  hg::DeviceProfile emoji = Rig::profile("ws://hermes.local:8765/gadget");
+  emoji.emoji_face = true;
+  Rig r(emoji);
+  r.app.begin();
+  r.app.on_network(true);
+  r.advance(1000);
+  r.app.on_transport_open();
+  r.server(R"({"type":"action","id":"a1","name":"face.set","args":{"expression":"sleepy"}})");
+  CHECK(r.app.model().look_set);
+  CHECK(r.app.model().look == hg::emoji::Look::Sleeping);
+  // neutral clears it and the screen's own face comes back
+  r.server(R"({"type":"action","id":"a2","name":"face.set","args":{"expression":"neutral"}})");
+  CHECK(!r.app.model().look_set);
+}
+
+// The resting rotation: a pure-emoji board left idle changes its calm face every 20 s, so a
+// still pair of eyes never reads as a frozen screen. It must never take the face away from a
+// turn, a cue or a face the host named.
+TEST("app: an idle pure-emoji board rotates its calm face") {
+  hg::DeviceProfile emoji = Rig::profile("ws://hermes.local:8765/gadget");
+  emoji.emoji_face = true;
+  Rig r(emoji);
+  r.bring_online(true);
+  CHECK(r.app.screen() == hg::Screen::Ready);
+  CHECK(r.app.model().look_set);
+  const hg::emoji::Look first = r.app.model().look;
+  r.advance(25000);
+  CHECK(r.app.model().look_set);
+  const hg::emoji::Look second = r.app.model().look;
+  CHECK(second != first);  // never the one already up
+  r.advance(25000);
+  CHECK(r.app.model().look != second);
+
+  // A face the host named owns the screen: the rotation waits its turn.
+  r.server(R"({"type":"emote","look":"cool","ttl_s":30})");
+  CHECK(r.app.model().look == hg::emoji::Look::Cool);
+  r.advance(5000);
+  CHECK(r.app.model().look == hg::emoji::Look::Cool);
+}

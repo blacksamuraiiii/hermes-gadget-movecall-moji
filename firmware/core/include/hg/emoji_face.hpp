@@ -17,6 +17,11 @@ namespace hg::emoji {
 // covers Confused (removed: the two differ only in the right eye, and
 // Silly's "<" reads better). Hi drops the GIF's "Hi" text — this branch has
 // no text — and the radiating lines carry the greeting instead.
+// How much larger than the box it is handed the artwork is drawn: the 240 px design frame
+// fills most of the glass, so a caller that wants the face to reach the panel's edge passes
+// panel_size / kDrawScale. Overridable at build time (HG_EMOJI_ZOOM) for a preview.
+inline constexpr float kDrawScale = 1.2f;
+
 enum class Look : uint8_t {
   Neutral,
   Happy,

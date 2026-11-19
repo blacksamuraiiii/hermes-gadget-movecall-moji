@@ -58,6 +58,10 @@ struct DeviceProfile {
   // The touchscreen's pixels per inch, so tap targets are about 7 mm tall; 0 assumes kDefaultTouchPpi.
   uint16_t touch_ppi = 0;
   static constexpr uint16_t kDefaultTouchPpi = 200;
+  // The board draws its own pure-emoji face (hg/emoji_face.hpp) over the whole panel
+  // instead of the mascot and every text screen: eyes only, no words. It also stops the
+  // device advertising the caps the host would have to put text on screen for.
+  bool emoji_face = false;
   // A motion sensor feeds App::on_motion 5-25 times a second. Boards with one
   // and a backlit display can sleep while lying face down (face_down_sleep).
   bool motion_sensor = false;
@@ -388,6 +392,8 @@ class App {
   void h_ping(const json::Value& m);
   void h_diag(const json::Value& m);
   void h_notice(const json::Value& m);
+  // The host names a face for this turn (`emote`): what the AI thought the answer deserved.
+  void h_emote(const json::Value& m);
   void h_error(const json::Value& m);
   void h_prompt(const json::Value& m);
   void h_prompt_close(const json::Value& m);
@@ -553,6 +559,21 @@ class App {
   // The user's next turn ends it: called where a recording starts, a typed message is sent and a
   // new session is asked for. A turn Hermes starts by itself does not.
   void end_expression();
+  // The pure-emoji face's state (only boards with BoardConfig::emoji_face draw it): the look
+  // the host named, its time, one asked for while she was speaking, and the cue after a turn.
+  // The resting rotation (see update_model): the calm face on screen, when it last changed,
+  // and whether one has been picked since she went idle.
+  emoji::Look pick_idle_look();
+  emoji::Look idle_look_ = emoji::Look::Neutral;
+  uint32_t idle_look_at_ = 0;
+  bool idle_look_set_ = false;
+  emoji::Look named_look_ = emoji::Look::Neutral;
+  uint32_t named_look_until_ = 0;
+  bool has_pending_look_ = false;
+  emoji::Look pending_look_ = emoji::Look::Neutral;
+  uint32_t pending_look_ms_ = 0;
+  uint32_t done_until_ = 0;
+  bool was_speaking_ = false;
   mascot::Expression expression_now();  // ends it first when its seconds are over
   bool expression_still() const;        // its mark has moved for long enough
   std::string face_command(std::string_view args);

@@ -443,6 +443,31 @@ A device with a display advertises `face.set` in `hello.actions`. It gives the f
 
 [The mascot](architecture.md#the-mascot) says what each expression looks like.
 
+#### The pure-emoji face: `caps.face` and the `emote` message (`moji-emoji-v2`, not upstream)
+
+The Movecall Moji board draws 小墨's pure-emoji face instead of the mascot: twenty eyes-only
+states over the whole panel, and no text anywhere. Two extensions carry that (they are this
+fork's, not Adolanium's; a server that does not know them works, it just never names a face).
+
+- `caps.face` is `"emoji"` on such a board and `"mascot"` on every other. It is not
+  `caps.faces` (below), which is the picture a profile sends.
+- A board with `caps.face: "emoji"` advertises **none** of `caps.card`, `caps.choice`,
+  `caps.dashboard`, `caps.profiles` or `caps.interpret`: it has no text screen for them, so
+  the server falls back to speech. A tool that would draw text should refuse rather than send
+  something the board drops.
+- The server names a face with `{"type": "emote", "look": "<name>", "ttl_s": 8}`. The names
+  are `neutral`, `happy`, `sad`, `thinking`, `sleeping`, `listening`, `speaking`, `silly`,
+  `laughing`, `loving`, `angry`, `shocked`, `embarrassed`, `winking`, `excited`, `bored`,
+  `cool`, `hi`, `connecting`, `disconnected`. An unknown name draws the neutral face.
+- The face shown is the first of: the link (connecting or offline), the wake cue, her own
+  playback (the mouth follows the sound), a question waiting on the user (a prompt or a
+  choice), the happy beat after a finished turn, the `emote` face while its `ttl_s` lasts,
+  then the screen's own face. What the board knows therefore beats what the server guessed.
+- A face named while she is speaking waits for the playback to end and then takes its full
+  time, so the mouth keeps matching the sound.
+- `face.set` (above) works too: its four expressions land on four of the twenty states
+  (`happy`, `silly`, `shocked`, `sleeping`), and `neutral` hands the face back to the screen.
+
 ### Telemetry and events (device → server)
 
 | Message | Meaning |

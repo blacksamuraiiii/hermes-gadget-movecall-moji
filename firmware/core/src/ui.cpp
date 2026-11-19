@@ -6,6 +6,7 @@
 #include <cstring>
 #include <vector>
 
+#include "hg/face_pen.hpp"
 #include "hg/font.hpp"
 #include "hg/font_cjk.hpp"
 
@@ -152,6 +153,9 @@ void channels(uint16_t c, uint8_t out[3]) {
 // app's 10 frames a second), or 40 while Hermes speaks.
 EdgeRing edge_ring(const UiModel& m) {
   EdgeRing r;
+  // A pure-emoji board draws its own spinner on the glass while connecting, and the face
+  // carries the rest: no ring under it.
+  if (m.emoji) return r;
   const auto level = [&r](int permille, uint16_t colour, uint16_t dim) {
     r.kind = EdgeRing::Kind::Level;
     r.permille = static_cast<int16_t>(std::clamp(permille, 0, 1000));
@@ -336,6 +340,69 @@ uint16_t caption_color(Screen s) {
 
 }  // namespace
 
+// The face a pure-emoji board shows. The order is the promise: what the board knows beats
+// what the host guessed. link -> her own wake cue -> her own playback -> a question waiting
+// -> a finished turn -> the AI's named face -> the screen.
+emoji::Look emoji_look(const UiModel& m) {
+  switch (m.link) {
+    case Link::Connecting:
+    case Link::Network: return emoji::Look::Connecting;
+    case Link::Offline: return emoji::Look::Disconnected;
+    case Link::Online: break;
+  }
+  // The wake cue is her answering to her name, not reporting a reply: she waves the
+  // maracas instead of opening the speaking mouth (user, 2026-11-09).
+  if (m.wake_cue) return emoji::Look::Happy;
+  // The mouth has to match the sound: a named face waits for the playback to end.
+  if (m.screen == Screen::Responding && m.speaking) return emoji::Look::Speaking;
+  // A reminder speaks before the resting face does: the user has to act on it, and on a
+  // pure-emoji board this face is the only sign that anything happened.
+  if (m.screen == Screen::Prompt) return emoji::Look::Silly;    // "?" — the host wants permission
+  if (m.screen == Screen::Choice) return emoji::Look::Shocked;  // "!!" — the host needs a choice
+  if (m.done_cue) return emoji::Look::Happy;                    // maracas — the task finished
+  // What the host named for this turn (the AI's read on the answer).
+  if (m.look_set) return m.look;
+  switch (m.screen) {
+    case Screen::Listening: return emoji::Look::Listening;
+    case Screen::Thinking: return emoji::Look::Thinking;
+    case Screen::Responding: return m.speaking ? emoji::Look::Speaking : emoji::Look::Neutral;
+    case Screen::Error: return emoji::Look::Sad;
+    case Screen::Updating: return emoji::Look::Thinking;
+    case Screen::Alarm: return emoji::Look::Excited;
+    default: return emoji::Look::Neutral;
+  }
+}
+
+// The part of the pure-emoji face that moves, so a still face does not repaint.
+uint32_t emoji_anim_key(const UiModel& m) {
+  const emoji::Look look = emoji_look(m);
+  switch (look) {
+    case emoji::Look::Neutral:  // the idle glance runs on its own 40-frame cycle
+      return static_cast<uint32_t>(look) * 16 + (m.frame % 40);
+    case emoji::Look::Thinking: return static_cast<uint32_t>(look) * 16 + (m.frame / 3) % 4;
+    case emoji::Look::Sleeping: return static_cast<uint32_t>(look) * 16 + (m.frame / 5) % 6;
+    case emoji::Look::Connecting: return static_cast<uint32_t>(look) * 16 + (m.frame % 20);
+    case emoji::Look::Speaking:
+      return static_cast<uint32_t>(look) * 16 + (m.frame % 20) + (m.level / 10) * 64;
+    case emoji::Look::Sad:
+    case emoji::Look::Cool:    // the sunglasses sway
+    case emoji::Look::Happy:   // shaking maracas
+    case emoji::Look::Silly:
+    case emoji::Look::Laughing:
+    case emoji::Look::Loving:
+    case emoji::Look::Angry:
+    case emoji::Look::Shocked:
+    case emoji::Look::Embarrassed:
+    case emoji::Look::Winking:
+    case emoji::Look::Excited:  // the stars twinkle
+    case emoji::Look::Bored:    // the half-shut eyes sink
+    case emoji::Look::Hi:       // the eyes grow, then the rays pulse
+      // These animate on the GIF's 20-frame cycle, so they repaint every frame.
+      return static_cast<uint32_t>(look) * 16 + (m.frame % 20);
+    default: return static_cast<uint32_t>(look) * 16 + ((m.frame % 45) < 2 ? 1u : 0u);
+  }
+}
+
 const char* screen_name(Screen s) {
   switch (s) {
     case Screen::Boot: return "boot";
@@ -370,8 +437,10 @@ const char* screen_name(Screen s) {
 Ui::Ui(Display& display)
     : display_(display), panel_(display.info()), info_(panel_), bg_(panel_.emissive ? 0 : kBg) {
   if (panel_.round) {
-    // The largest square inside the circle; the corners of the panel do not exist.
-    const int side = std::min(panel_.width, panel_.height) * 707 / 1000;
+    // The largest square inside the circle; the corners of the panel do not exist. A board
+    // that draws no text can ask for the whole circle instead (DisplayInfo::round_area_permille).
+    const uint16_t permille = std::clamp<uint16_t>(panel_.round_area_permille, 100, 1000);
+    const int side = std::min(panel_.width, panel_.height) * permille / 1000;
     ox_ = (panel_.width - side) / 2;
     oy_ = (panel_.height - side) / 2;
     info_.width = info_.height = static_cast<uint16_t>(side);
@@ -385,9 +454,14 @@ Ui::Ui(Display& display)
   const int bar_h = Canvas::line_height(s) + 2 * s;
   // A round panel's top band holds the link dot and one line of the settings
   // label: 2r + 14s, and never under 36 px so the hold target stays finger-sized.
+  // A board with no touch (DisplayInfo::no_top_band) has no hold target and no lamp,
+  // so the header starts at the top edge and the band takes no rows at all.
   const int dot_r = std::max(2, 3 * s / 2 + 1);
-  layout_.top_h = panel_.round ? std::max(36, 2 * dot_r + 14 * s) : bar_h;
-  layout_.bottom_h = bar_h;
+  layout_.top_h = panel_.no_top_band ? 0
+                 : panel_.round     ? std::max(36, 2 * dot_r + 14 * s)
+                                    : bar_h;
+  // A board with one key has no hint row to show.
+  layout_.bottom_h = panel_.no_bottom_bar ? 0 : bar_h;
   layout_.title_w = panel_.round ? std::min(w, 120 * s) : w;
   layout_.header_h = Canvas::line_height(s + 1) + 4 * s;
   layout_.main_y = layout_.top_h;
@@ -576,6 +650,14 @@ void Ui::draw_frame(const UiModel& m) {
   const bool dot_moved = ring_moved && ring_.kind == EdgeRing::Kind::Ticks && ring.kind == EdgeRing::Kind::Ticks;
   const int32_t dot_was = ring_dot_y16_;
   set_ring(ring);
+  if (m.emoji) {
+    // A pure-emoji board has one screen: the face, over the whole panel. Everything else the
+    // host sends (a card, a question, an error) is spoken instead of drawn, so none of the
+    // text screens is reached at all.
+    if (full_face_ != FullFace::Emoji) valid_ = false;  // came from another screen: repaint it all
+    draw_emoji(m);
+    return;
+  }
   if (m.screen == Screen::Alarm) {
     draw_alarm(m);
     return;
@@ -2161,6 +2243,38 @@ void Ui::update_ring(const RingBox& box) {
 // of the panel), the mascot sits over it when there is room, and the timer's label under it:
 // the group is centred on the glass and kept clear of the hint. Round panels fit every line to
 // the chord at its own rows.
+// The pure-emoji board's one screen: the face, over the whole panel. It repaints only when
+// something about the face changed (the look, or its step in the animation), like the other
+// whole-panel faces.
+void Ui::draw_emoji(const UiModel& m) {
+  const emoji::Look look = emoji_look(m);
+  const uint32_t key = emoji_anim_key(m);
+  if (valid_ && full_face_ == FullFace::Emoji && key == face_hash_) return;
+  full_face_ = FullFace::Emoji;
+  face_hash_ = key;
+  valid_ = true;  // leaving this screen repaints everything anyway (draw_frame)
+
+  const int W = panel_.width, H = panel_.height;
+  // The face is drawn kDrawScale times its box (the design frame fills most of the glass),
+  // so the box that makes it reach the edge is the panel over that scale.
+  const int size = static_cast<int>(std::lround(std::min(W, H) / emoji::kDrawScale));
+  const uint16_t ring_colour = rgb565(255, 205, 0);  // the connecting spinner, from the artwork
+  each_window(0, H, [&](int, int) {
+    Canvas panel = panel_canvas();
+    panel.fill_rect(0, 0, W, H, bg_);
+    emoji::draw(panel, (W - size) / 2, (H - size) / 2, size, look, m.frame, m.level, kText, bg_);
+    if (look == emoji::Look::Connecting) {
+      // The spinner hugs the glass instead of the face: drawn in the panel's own frame, a
+      // hair inside the arc so the row clips it cleanly.
+      const int rbox = std::min(W, H) - 6;
+      FacePen ring(panel, (W - rbox) / 2, (H - rbox) / 2, rbox, ring_colour, bg_);
+      const int rot = static_cast<int>((m.frame * 18) % 360);
+      ring.arc(120, 120, 113, 12, static_cast<float>((300 + rot) % 360),
+               static_cast<float>((240 + rot) % 360), ring_colour);
+    }
+  });
+}
+
 void Ui::draw_alarm(const UiModel& m) {
   // No ring over the alarm (edge_ring): it owns the whole panel.
   const uint32_t key = Hash().val(m.flash).add(m.headline).add(m.detail).add(m.hint).val(m.lang)
