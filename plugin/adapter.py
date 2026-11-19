@@ -248,6 +248,11 @@ def _profile_label(info: Any) -> str:
     return name[:1].upper() + name[1:]
 
 
+# The face a reminder shows on a board that draws no text (firmware emoji_look has the same
+# mapping for prompt/choice; done is the finished-turn face). approval and sudo share a cue.
+_REMINDER_LOOKS = {"done": "happy", "approval": "silly", "sudo": "silly", "clarify": "shocked"}
+
+
 class GadgetAdapter(BasePlatformAdapter, HubDelegate):
     MAX_MESSAGE_LENGTH = MAX_MESSAGE_LENGTH
     supports_status_text = True
@@ -2143,7 +2148,7 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
             return SendResult(success=False, error="the gadget is in interpreter mode; try again when it has left it")
         return None
 
-    async def play_cue(self, cue: str) -> bool:
+    async def play_cue(self, cue: str, *, skip_emoji: bool = False) -> bool:
         """Play one pre-cut cue on the gadget: no card, no turn, no text-to-speech.
 
         Used for the wake-word acknowledgement ("我在", cut by tools/make_cues.py): the device
@@ -2178,6 +2183,8 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
         for session in list(hub.sessions.values()):
             if not session.paired or not session.has_speaker:
                 continue
+            if skip_emoji and session.face == "emoji":
+                continue  # its reminder is the face, not a voice
             if rate != session.speaker_rate:
                 # make_cues.py cuts at the codec rate; anything else would play at the wrong
                 # pitch, which is worse than a silent cue.
@@ -2197,6 +2204,37 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
         """
         text = textfmt.spoken_symbols(text)
         return super().prepare_tts_text(text)
+
+    async def push_reminder(self, cue: str, title: str, body: str = "", ttl_s: float = 20.0,
+                            spec: Optional[Dict[str, Any]] = None) -> bool:
+        """Play a pre-cut cue on the gadget, then show its fixed card (plugin/notify.py).
+
+        Called from a plugin hook on the agent thread: the cue is a file cut once by
+        tools/make_cues.py, so a reminder costs no tokens and no text-to-speech. Audio comes
+        first because playing it lights a sleeping screen. A pure-emoji board has no text to
+        draw, so it gets the cue alone.
+        """
+        hub = self._hub
+        if hub is None:
+            return False
+        targets = [s for s in hub.sessions.values() if s.paired and not s.closed]
+        if self.config.home_channel:
+            home = [s for s in targets if s.device_id == self.config.home_channel]
+            targets = home or targets
+        if not targets:
+            return False
+        await self.play_cue(cue, skip_emoji=True)
+        for session in targets:
+            if session.face == "emoji":
+                # No text to draw and no voice to leave hanging: the face is the reminder.
+                look = _REMINDER_LOOKS.get(cue)
+                if look:
+                    await session.emote(look, ttl_s)
+                continue
+            head, text = notify.card_text(spec, session.charset) if spec else (title, body)
+            if head:
+                await session.show_card(head, text, ttl_s=ttl_s)
+        return True
 
     async def play_tts(self, chat_id: str, audio_path: str, **kwargs) -> SendResult:
         return self._interpret_refusal(chat_id) or await self._play_file(chat_id, audio_path)
