@@ -100,8 +100,10 @@ void draw_listening_arcs(Pen& p, uint32_t frame) {
 // The three thinking dots, up and to the far side, one of them breathing.
 void draw_thinking_dots(Pen& p, uint32_t frame) {
   const int active = static_cast<int>((frame / 3) % 4);
-  const float cx[3] = {160, 180, 202};
-  const float cy[3] = {46, 40, 34};
+  // Pulled in from (160/180/202, 46/40/34): the third dot reached radius 126.6 on a 240 px
+  // panel whose glass is the inscribed circle (radius 120). This keeps the outermost edge at 113.
+  const float cx[3] = {152, 170, 188};
+  const float cy[3] = {52, 46, 40};
   const float r[3] = {5, 6, 7};
   for (int i = 0; i < 3; ++i) p.disc(cx[i], cy[i], r[i] + (i == active ? 1.0f : 0.0f), p.ink());
 }
@@ -155,9 +157,12 @@ void draw_tear(Pen& p, float cx, float cy) {
 // The "?" (silly): a hook on top, a short stem, and a dot. Drawn from
 // primitives because the face carries no font.
 void draw_question(Pen& p) {
-  p.arc(214, 30, 9, 4, 180, 30, p.ink());
-  p.line(214, 40, 214, 50, 4, p.ink());
-  p.disc(214, 57, 2.5f, p.ink());
+  // Kept inside the round panel: at 1.2x the design frame maps 1:1 to a 240 px panel whose
+  // usable area is the inscribed circle (radius 120 about 120,120), so a hook centred at
+  // (214,30) — the artwork's corner — fell outside the glass. (192,48) leaves 7 px of margin.
+  p.arc(192, 48, 9, 4, 180, 30, p.ink());
+  p.line(192, 58, 192, 68, 4, p.ink());
+  p.disc(192, 75, 2.5f, p.ink());
 }
 
 // The connecting ring: a 300 deg arc with a 60 deg gap, turning about the face

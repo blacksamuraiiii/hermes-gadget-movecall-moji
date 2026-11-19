@@ -159,10 +159,11 @@ TEST("emoji face: shocked eyes are solid discs") {
 }
 
 TEST("emoji face: silly has a question mark") {
-  // The "?" sits at design x~205-223, y~21-60: canvas x 184-198, y 36-59.
+  // The "?" sits at design x~183-201, y~39-78 (pulled in from 205-223 / 21-60 so the glass'
+  // inscribed circle can show it): canvas x 167-181, y 44-74.
   const Frame silly = render(hg::emoji::Look::Silly);
-  CHECK(count_rect(silly, kInk, 184, 36, 198, 59) > 5);
-  CHECK(count_rect(render(hg::emoji::Look::Neutral), kInk, 184, 36, 198, 59) == 0);
+  CHECK(count_rect(silly, kInk, 166, 42, 184, 76) > 5);
+  CHECK(count_rect(render(hg::emoji::Look::Neutral), kInk, 166, 42, 184, 76) == 0);
 }
 
 // The neutral baseline below uses frame 0: the idle glance shifts the eyes sideways
@@ -296,5 +297,38 @@ TEST("emoji face: every look fills the glass and stays inside it") {
     CHECK(w >= 70);
     CHECK(h >= 30);
     CHECK(x0 >= 0 && y0 >= 0 && x1 < kCanvas && y1 < kCanvas);
+  }
+}
+
+TEST("emoji face: every look stays inside the round panel's glass") {
+  // The mapping Ui::draw_emoji uses on a 240 px panel: box = panel / kDrawScale, centred, and
+  // draw() grows it back to the panel size, so design coordinates land 1:1 on the glass. The
+  // visible area is the inscribed circle (radius 120 about 120, 120): the silly "?" used to
+  // sit at (214, 30) and the third thinking dot reached radius 126, both off the panel.
+  const int size = static_cast<int>(kCanvas / hg::emoji::kDrawScale + 0.5f);
+  const int at = (kCanvas - size) / 2;
+  const hg::emoji::Look looks[] = {
+      hg::emoji::Look::Neutral,   hg::emoji::Look::Happy,    hg::emoji::Look::Sad,
+      hg::emoji::Look::Thinking,  hg::emoji::Look::Sleeping, hg::emoji::Look::Listening,
+      hg::emoji::Look::Speaking,  hg::emoji::Look::Silly,    hg::emoji::Look::Laughing,
+      hg::emoji::Look::Loving,    hg::emoji::Look::Angry,    hg::emoji::Look::Shocked,
+      hg::emoji::Look::Embarrassed, hg::emoji::Look::Winking, hg::emoji::Look::Excited,
+      hg::emoji::Look::Bored,     hg::emoji::Look::Cool,     hg::emoji::Look::Hi,
+      hg::emoji::Look::Connecting, hg::emoji::Look::Disconnected};
+  for (hg::emoji::Look look : looks) {
+    for (uint32_t frame : {0u, 3u, 7u, 11u, 15u, 19u}) {
+      Frame fb(static_cast<size_t>(kCanvas) * kCanvas, kBg);
+      hg::Canvas c(fb.data(), kCanvas, kCanvas, false);
+      hg::emoji::draw(c, at, at, size, look, frame, 60, kInk, kBg);
+      int outside = 0;
+      for (int y = 0; y < kCanvas; ++y) {
+        for (int x = 0; x < kCanvas; ++x) {
+          if (fb[static_cast<size_t>(y) * kCanvas + x] == kBg) continue;
+          const float dx = x + 0.5f - 120.0f, dy = y + 0.5f - 120.0f;
+          if (dx * dx + dy * dy > 120.0f * 120.0f) ++outside;
+        }
+      }
+      CHECK_EQ(outside, 0);
+    }
   }
 }
