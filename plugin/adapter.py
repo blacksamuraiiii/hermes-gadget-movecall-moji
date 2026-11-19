@@ -248,11 +248,6 @@ def _profile_label(info: Any) -> str:
     return name[:1].upper() + name[1:]
 
 
-# The face a reminder shows on a board that draws no text (firmware emoji_look has the same
-# mapping for prompt/choice; done is the finished-turn face). approval and sudo share a cue.
-_REMINDER_LOOKS = {"done": "happy", "approval": "silly", "sudo": "silly", "clarify": "shocked"}
-
-
 class GadgetAdapter(BasePlatformAdapter, HubDelegate):
     MAX_MESSAGE_LENGTH = MAX_MESSAGE_LENGTH
     supports_status_text = True
@@ -2227,7 +2222,7 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
         for session in targets:
             if session.face == "emoji":
                 # No text to draw and no voice to leave hanging: the face is the reminder.
-                look = _REMINDER_LOOKS.get(cue)
+                look = notify.look_for(cue)
                 if look:
                     await session.emote(look, ttl_s)
                 continue

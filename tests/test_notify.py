@@ -177,3 +177,23 @@ def test_the_cards_fit_an_ascii_screen():
         assert notify.card_text(spec, "ascii") == (spec["title"], spec["body"])
         assert len(spec["title"]) <= 12
         assert len(spec["body"]) <= 24
+
+
+def test_every_reminder_has_a_face_for_a_textless_board():
+    """The four hooks (approval, sudo, clarify, done) each need a look: on a pure-emoji board
+    the face IS the reminder — without one the reminder would be silence."""
+    from hermes_gadget_plugin import notify
+
+    known = {
+        "neutral", "happy", "sad", "thinking", "sleeping", "listening", "speaking", "silly",
+        "laughing", "loving", "angry", "shocked", "embarrassed", "winking", "excited", "bored",
+        "cool", "hi", "connecting", "disconnected",
+    }
+    assert set(notify.CUES) <= set(notify.REMINDER_LOOKS)
+    assert set(notify.REMINDER_LOOKS.values()) <= known
+    # The mapping the board actually gets, cue by cue.
+    assert notify.look_for("done") == "happy"
+    assert notify.look_for("approval") == "silly"
+    assert notify.look_for("sudo") == "silly"
+    assert notify.look_for("clarify") == "shocked"
+    assert notify.look_for("nope") == ""

@@ -47,6 +47,15 @@ CUES: dict[str, dict[str, Any]] = {
 # Hermes reports which kind of block this is; unknown kinds are not announced.
 KIND_CUES = {"approval": "approval", "sudo": "sudo", "clarify": "clarify"}
 
+# The face a reminder shows on a board that draws no text: its screen is the whole point, and a
+# spoken cue there would be a voice out of nowhere. approval and sudo share one cue.
+REMINDER_LOOKS = {"done": "happy", "approval": "silly", "sudo": "silly", "clarify": "shocked"}
+
+
+def look_for(cue: str) -> str:
+    """The face this reminder shows on a textless board, or "" when it has none."""
+    return REMINDER_LOOKS.get(cue, "")
+
 COOLDOWN_S = 4.0        # the same request twice inside this window is one reminder
 MIN_TURN_S = 45.0       # a turn shorter than this is not worth a "done"
 
