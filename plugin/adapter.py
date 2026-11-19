@@ -63,7 +63,7 @@ from gateway.platforms.base import (
 from gateway.platforms.event import MessageEvent, MessageType
 
 from . import audio as gaudio
-from . import botchat, compat, dashboard, imaging, interpret, ota, runtime, stt, textfmt
+from . import botchat, compat, dashboard, imaging, interpret, notify, ota, runtime, stt, textfmt
 from . import diag as gdiag
 from .desk import Desk
 from . import status as live_status
@@ -269,6 +269,11 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
         self._auto_home = _flag(extra.get("auto_home"), True)
         self._battery_log_on = _flag(extra.get("battery_log"), False)
         self._dashboard_on = _flag(extra.get("dashboard"), True)
+        # Reminders on the board (plugin/notify.py): the approval/question cues and the "done"
+        # ring when a long turn finishes elsewhere. Without BRIDGE.register in __init__ these
+        # hooks are never attached, and without this line the profile's settings are ignored.
+        self._reminders_on = _flag(extra.get("reminders"), True)
+        self._reminder_min_turn_s = float(extra.get("reminder_min_turn_s") or notify.MIN_TURN_S)
         self._profile_faces = _flag(extra.get("profile_faces"), True)
         self._convert_avatars: Optional[bool] = None  # Pillow present; asked once
         # Profile switching: off without the key; "all" offers every served profile; a list offers those.
@@ -380,6 +385,7 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
             self._boards[dashboard.BOARD] = dashboard.BOARD.subscribe(self._board_changed)
             self._dashboard_task = asyncio.create_task(self._watch_dashboard())
         self._mark_connected()
+        notify.BRIDGE.configure(enabled=self._reminders_on, min_turn_s=self._reminder_min_turn_s)
         self._wire_plugin_handlers(None)
         logger.info("[%s] devices connect to %s://<this host>:%s%s", self.name,
                     "wss" if ssl_ctx else "ws", self._hub.bound_port, self._hub.path)
@@ -2181,6 +2187,16 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
             await session.play_pcm(pcm, rate)
             played = True
         return played
+
+    def prepare_tts_text(self, text: str) -> str:
+        """Read a Chinese answer's symbols in Chinese before the base normaliser sees them.
+
+        Hermes expands ``37%`` to "37 percent" and ``2~11℃`` to "2 about 11℃", and its
+        identifier filter drops the numbers in a ``11/1℃`` range — all of which come out of
+        the speaker as English words in the middle of a Chinese sentence.
+        """
+        text = textfmt.spoken_symbols(text)
+        return super().prepare_tts_text(text)
 
     async def play_tts(self, chat_id: str, audio_path: str, **kwargs) -> SendResult:
         return self._interpret_refusal(chat_id) or await self._play_file(chat_id, audio_path)

@@ -229,3 +229,35 @@ def for_device(text: str, charset: str = "ascii") -> str:
         text = fold_ascii(text)
     text = "\n".join(_SPACES.sub(" ", line).rstrip() for line in text.splitlines())
     return _BLANKS.sub("\n\n", text).strip()
+
+
+# Spoken Chinese. Hermes's own TTS normaliser expands "37%" to "37 percent" and "2~11℃" to
+# "2 about 11℃", and its identifier filter drops the numbers in an "11/1℃" range. Every one of
+# those lands in the middle of a Chinese sentence as an English word, so the symbols are read in
+# Chinese before that normaliser runs (GadgetAdapter.prepare_tts_text).
+_PERCENT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%")
+_RANGE_TILDE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*[~～]\s*(\d+(?:\.\d+)?)")
+_RANGE_SLASH_RE = re.compile(r"(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)")
+
+# Symbols a Chinese TTS either reads in English or skips. The table is the one the muse-tts
+# server (Azure front end) has carried since 2026-10-17; Hermes's normaliser expands %, ~, →
+# and ≈ as English words ("37 percent", "2 about 11", "to"), so they are read in Chinese here
+# before it runs. ℃ and % stay symbols where the TTS reads them correctly.
+_SYMBOL_WORDS = (
+    ("‰", "千分之"), ("±", "正负"), ("×", "乘"), ("÷", "除以"),
+    ("≠", "不等于"), ("≤", "小于等于"), ("≥", "大于等于"),
+    ("→", "到"), ("⇒", "到"), ("≈", "约"),
+    ("㎡", "平方米"), ("㎥", "立方米"), ("㎏", "千克"), ("㎝", "厘米"), ("㎜", "毫米"),
+)
+
+
+def spoken_symbols(text: str) -> str:
+    """Read a Chinese sentence's symbols as they are spoken: 37% -> 百分之37, 2~11 -> 2到11."""
+    if not text:
+        return text
+    text = _PERCENT_RE.sub(r"百分之\1", text)
+    text = _RANGE_TILDE_RE.sub(r"\1到\2", text)
+    text = _RANGE_SLASH_RE.sub(r"\1到\2", text)
+    for symbol, word in _SYMBOL_WORDS:
+        text = text.replace(symbol, word)
+    return text
