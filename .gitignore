@@ -12,6 +12,8 @@ build/
 
 # Host (CMake) builds
 /build/
+/build-host/
+/build-sim-moji/
 
 # The Desktop page's build tools (its bundle, plugin/desktop/plugin.js, ships with the plugin)
 plugin/desktop-src/node_modules/
@@ -46,5 +48,14 @@ Thumbs.db
 /build-emoji/
 /build-host/
 
-# Relay logs written next to the tool
-tools/relay*.log
+# Local runtime output: relay logs carry this machine's device id and paths,
+# .workbuddy is a local scratch/memory directory, not part of the project.
+tools/*.log
+.workbuddy/
+
+# Release images live in GitHub Releases, not in git: a 1.4 MB image per version
+# in history is what this rule exists to stop. Keep README.md and SHA256SUMS here.
+firmware/releases/*/*.bin
+
+# refs
+refs/
