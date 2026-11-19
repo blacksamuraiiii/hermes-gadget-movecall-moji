@@ -24,7 +24,7 @@
 
 | 角色 | 仓库 | 用途 |
 |---|---|---|
-| origin | `github.com/blacksamuraiiii/hermes-gadget-sdk` | 我的 fork，日常提交与推送目标 |
+| origin | `github.com/blacksamuraiiii/hermes-gadget-movecall-moji` | 我的 fork（2026-11-19 由 `hermes-gadget-sdk` 改名，旧 URL 自动重定向），日常提交与推送目标 |
 | upstream | `github.com/Adolanium/hermes-gadget-sdk` | 上游主仓库，只读，定期拉取 |
 
 同步上游（本仓已改为**整树吸收**：把上游树拿过来再回植本 fork 独有资产，见 `合并-上游0.6.md`）：
