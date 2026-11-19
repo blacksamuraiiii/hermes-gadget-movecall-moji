@@ -157,12 +157,15 @@ void draw_tear(Pen& p, float cx, float cy) {
 // The "?" (silly): a hook on top, a short stem, and a dot. Drawn from
 // primitives because the face carries no font.
 void draw_question(Pen& p) {
-  // Kept inside the round panel: at 1.2x the design frame maps 1:1 to a 240 px panel whose
-  // usable area is the inscribed circle (radius 120 about 120,120), so a hook centred at
-  // (214,30) — the artwork's corner — fell outside the glass. (192,48) leaves 7 px of margin.
-  p.arc(192, 48, 9, 4, 180, 30, p.ink());
-  p.line(192, 58, 192, 68, 4, p.ink());
-  p.disc(192, 75, 2.5f, p.ink());
+  // Kept inside the round panel and drawn as one stroke path: at 1.2x the design frame maps
+  // 1:1 to a 240 px panel whose usable area is the inscribed circle (radius 120 about
+  // 120,120). The old hook at (214,30) sat off the glass; a gap between hook and stem then
+  // read as "small arc + exclamation mark", so the hook runs into the stem here.
+  p.arc(188, 46, 9, 4, 180, 0, p.ink());  // the hook: over the top, left to right
+  p.line(197, 46, 197, 52, 4, p.ink());   // its right side comes down
+  p.line(197, 52, 188, 58, 4, p.ink());   // and turns back to the centre line
+  p.line(188, 58, 188, 66, 4, p.ink());   // the stem
+  p.disc(188, 73, 2.5f, p.ink());         // the dot
 }
 
 // The connecting ring: a 300 deg arc with a 60 deg gap, turning about the face
