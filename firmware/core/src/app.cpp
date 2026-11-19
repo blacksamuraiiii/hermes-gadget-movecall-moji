@@ -404,7 +404,9 @@ void App::begin() {
   add_timer_actions();  // timer.start/status/cancel, beside the built-in actions
   add_face_actions();   // face.set
   if (hal_.display) ui_ = std::make_unique<Ui>(*hal_.display);
-  if (ui_ && profile_.faces && profile_.colour_face_alloc && !colour_) {
+  // A pure-emoji board draws its own face and never a profile face, so the colour-face buffer
+  // is not even allocated there: it would be ~196 KB of PSRAM nothing ever draws.
+  if (ui_ && !profile_.emoji_face && profile_.faces && profile_.colour_face_alloc && !colour_) {
     const int px = std::min(256, ui_->face_px());
     const size_t row = static_cast<size_t>(px) * 2;
     // The picture and half as many rows again for its bands; else the picture alone, which stays still.
@@ -707,7 +709,9 @@ void App::send_hello() {
     caps.set("profiles", true);
     caps.set("interpret", 1);  // it draws the mode; a device without a screen has nothing to draw
   }
-  if (ui_ && profile_.faces) {
+  // A pure-emoji board draws no profile face either: its own face owns the whole panel, so
+  // announcing the cap would only cost a 26-36 KB message nothing ever shows.
+  if (text_ui && profile_.faces) {
     json::Value colour = json::Value::object().set("v", 2).set("px", colour_px_);
     if (colour_bands_) colour.set("frames", true);
     if (thumb_px_) colour.set("thumbs", thumb_px_);

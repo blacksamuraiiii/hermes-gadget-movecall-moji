@@ -10925,6 +10925,9 @@ TEST("app: a pure-emoji board announces its face and no text caps") {
   CHECK(caps["dashboard"].is_null());
   CHECK(caps["profiles"].is_null());
   CHECK(caps["interpret"].is_null());
+  // No profile face either: the board's own face owns the whole panel, and a colour-face
+  // buffer for it would be PSRAM nothing ever draws.
+  CHECK(caps["faces"].is_null());
   // face.set still reaches it, mapped onto the twenty states.
   bool has_face_set = false;
   for (const auto& a : (*hello)["actions"].elements()) has_face_set |= a["name"].as_string() == "face.set";
@@ -10941,6 +10944,8 @@ TEST("app: a pure-emoji board announces its face and no text caps") {
   CHECK_EQ((*other)["caps"]["face"].as_string(), std::string("mascot"));
   CHECK((*other)["caps"]["card"].is_object());
   CHECK((*other)["caps"]["profiles"].as_bool());
+  // ...and it still offers faces, which the pure-emoji board must not.
+  CHECK(!(*other)["caps"]["faces"].is_null());
 }
 
 TEST("app: the emote message names the face for a while") {
