@@ -8,6 +8,7 @@
 #include "hg/font.hpp"
 #include "hg/protocol.hpp"
 #include "hg/setup.hpp"
+#include "hg/wake.hpp"
 #include "hg/wifi_networks.hpp"
 
 namespace hg {
@@ -59,6 +60,10 @@ constexpr uint32_t kEmoteMs = 8000;
 constexpr uint32_t kDoneCueMs = 5000;
 // The resting rotation: a new calm face this often while she sits idle.
 constexpr uint32_t kIdleLookMs = 20000;
+// A command word fires repeatedly for as long as it is spoken: act on one every so often.
+constexpr uint32_t kWakeHitThrottleMs = 2000;
+// The screen lights at the hit, but the recording waits for the host's cue ("我在") to finish.
+constexpr uint32_t kWakeCueWaitMs = 700;
 constexpr uint32_t kNewSessionHoldMs = 2000;  // hold CANCEL this long to start a new session
 constexpr uint32_t kNewSessionHintMs = 600;   // ...and show the countdown after this long
 constexpr uint32_t kPromptArmMs = 600;        // presses this soon after a question appears don't answer it
@@ -2079,10 +2084,60 @@ void App::on_button(Button button, bool pressed, bool touch) {
   update_model();
 }
 
+// The wake engine owns the microphone whenever nothing else does: it steps back for a
+// recording and stays quiet while the speaker plays (it would otherwise hear the answer and
+// wake itself), and is listening again the moment both are free.
+//
+// "Idle" is deliberately NOT part of that test: a turn that has finished playing but has not
+// settled yet is exactly when the user says the wake word again, and gating on idle left the
+// engine off for tens of seconds after the last sound.
+void App::update_wake() {
+  const bool wants_mic = mode_ != Mode::Listening && !speaking() && hardware_check_ == HardwareCheck::None;
+  if (wants_mic == wake_running_) return;
+  wake_running_ = wants_mic;
+  if (wants_mic)
+    hg::wake_resume();
+  else
+    hg::wake_pause();
+}
+
+// A command word fired. The log line comes first and unconditionally: the threshold scan needs
+// the score and which word fired, so even a hit that opened nothing is on record.
+void App::on_wake_hit(int command_id, float score) {
+  log(LogLevel::Info, "wake: command " + std::to_string(command_id) + " at " +
+                          std::to_string(static_cast<int>(score * 100.0f + 0.5f)) + " percent");
+  const uint32_t t = now();
+  if (wake_hit_at_ && t - wake_hit_at_ < kWakeHitThrottleMs) return;  // the same word, still firing
+  if (!can_talk() || settings_open() || prompt_showing() || mode_ != Mode::Idle) {
+    // A hit that never becomes a turn is invisible from the outside: say why.
+    log(LogLevel::Info, "wake: hit ignored (can_talk " + std::string(can_talk() ? "y" : "n") +
+                            ", settings " + std::string(settings_open() ? "y" : "n") +
+                            ", prompt " + std::string(prompt_showing() ? "y" : "n") + ", mode " +
+                            std::to_string(static_cast<int>(mode_)) + ")");
+    return;
+  }
+  wake_hit_at_ = t;
+  // Tell the host which word fired and how sure the model was; it answers with the cue.
+  json::Value msg = json::Value::object();
+  msg.set("type", "wake.hit").set("command", command_id).set("score", static_cast<int>(score * 100.0f + 0.5f));
+  send(msg);
+  wake_awaiting_cue_ = true;
+  wake_cue_at_ = t;
+  wake_display();
+  update_model();  // the screen lights up now, the recording waits for the cue
+}
+
 void App::start_listening(bool hands_free) {
   stop_playback();
   dismiss_overlay();
   if (alarm_) dismiss_alarm();
+  // Hand the microphone over before opening the talk session at the profile's own rate:
+  // update_wake() would do it on the next tick, too late for the samples in between.
+  if (wake_running_) {
+    wake_running_ = false;
+    hg::wake_pause();
+  }
+  wake_awaiting_cue_ = false;  // the turn is under way: the greeting face is done
   if (!hal_.mic || !hal_.mic->start(profile_.mic_rate)) {
     set_hint_flash(tr(i18n::Msg::MicUnavailable));
     return;
@@ -2901,6 +2956,14 @@ void App::tick() {
     if (turn_page()) update_model();
   }
 
+  // A hit waits for the host's cue before it records (on_wake_hit); the screen is already lit.
+  if (wake_awaiting_cue_ && t - wake_cue_at_ >= kWakeCueWaitMs && !speaking()) {
+    wake_awaiting_cue_ = false;
+    start_listening(true);
+    update_model();
+  }
+  // Every mode change above has settled by now, so one place decides who holds the microphone.
+  update_wake();
   flush_sensors();
   flush_display_state();
   timer_tick();
@@ -2940,7 +3003,9 @@ void App::update_model() {
   // The board's own face. face.set's four expressions become four of the twenty states, so
   // the AI's named face works on both channels; `emote` adds the other sixteen.
   m.emoji = profile_.emoji_face;
-  m.wake_cue = false;  // the wake word is not ported yet (notes/合并-上游0.6.md, step 7)
+  // A command word lit the screen and the host is answering with the cue: she waves the
+  // maracas rather than opening the speaking mouth, because that is a greeting.
+  m.wake_cue = wake_awaiting_cue_;
   m.done_cue = done_until_ != 0 && static_cast<int32_t>(now() - done_until_) < 0;
   m.look = emoji::Look::Neutral;
   m.look_set = false;
@@ -3356,7 +3421,7 @@ void App::update_model() {
   // Only while she is idle with nothing else to say — a cue, a face the host named or any
   // other screen owns the face otherwise. A still pair of eyes reads as a frozen screen.
   if (profile_.emoji_face && m.screen == Screen::Ready && mode_ == Mode::Idle && !speaking() &&
-      !m.look_set && !m.done_cue) {
+      !m.look_set && !m.done_cue && !m.wake_cue) {
     const uint32_t idle = now() - mode_since_;
     if (!idle_look_set_ || idle < idle_look_at_ || idle - idle_look_at_ >= kIdleLookMs) {
       idle_look_ = pick_idle_look();

@@ -277,7 +277,16 @@ void CodecMic::task(void* arg) {
       if (mic->rmnm_) hg::ws185_mono(mic->raw_, chunk, kMicChunk);
       return true;
     }
-    void deliver(const int16_t* chunk) { events::post(EventType::Mic, chunk, kMicChunk * sizeof(int16_t)); }
+    void deliver(const int16_t* chunk) {
+      // The wake engine holds the microphone only while the app is idle, where it drops Mic
+      // events anyway. Posting them would allocate and copy a chunk 100 times a second into a
+      // queue that real audio and control events need.
+      if (MicTap tap = mic_tap()) {
+        tap(chunk, kMicChunk);
+        return;
+      }
+      events::post(EventType::Mic, chunk, kMicChunk * sizeof(int16_t));
+    }
     void wait() { ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000)); }
     void pause() { vTaskDelay(pdMS_TO_TICKS(10)); }
   } ops{self};

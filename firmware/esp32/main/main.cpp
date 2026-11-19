@@ -335,6 +335,12 @@ void dispatch(hg::App& app, hgp::Event& ev) {
     case EventType::Mic:
       app.on_mic_samples(reinterpret_cast<const int16_t*>(ev.data), ev.len / sizeof(int16_t));
       break;
+    case EventType::WakeHit:
+      if (ev.len == sizeof(hgp::WakeHitSample)) {
+        const auto* hit = reinterpret_cast<const hgp::WakeHitSample*>(ev.data);
+        app.on_wake_hit(hit->command_id, hit->score);
+      }
+      break;
     case EventType::Console:
       ev.console->answer(app.console(std::string_view(text ? text : "", ev.len)));
       break;
@@ -552,6 +558,11 @@ extern "C" void app_main(void) {
     // Light-sleep boards power the DAC down while dozing, if the mics don't share it.
     if (board.light_sleep && g_codec.mic_link().switchable) g_codec_speaker.allow_power_down(g_codec.out_format());
   }
+#if CONFIG_HG_WAKE_MULTINET
+  // The wake engine holds this same microphone while the device is idle: it starts and stops
+  // it itself, and takes samples from the tap the audio port fires on every chunk.
+  if (hal.mic) hgp::wake_attach(hal.mic);
+#endif
   if (hal.speaker) hal.speaker_decoder = &g_opus;  // Opus replies when Hermes offers them
   const bool imu = peripherals_ready && board.imu.enabled && g_motion.begin(board.imu, i2c_bus);
   g_time.begin(board.rtc, i2c_bus, g_storage);

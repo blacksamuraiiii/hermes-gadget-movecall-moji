@@ -36,9 +36,16 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions-moji.csv"
 # CJK table (HG_CORE_FONT_CJK is a CMake option, off by default). The mascot
 # bitmaps that every v0.6 image links are simply never drawn here.
 
-# Wake word is this fork's own work and is re-ported in a later step; until then the board
-# boots with the BOOT key alone.
-# CONFIG_HG_WAKE_MULTINET
+# Wake word: MultiNet5 Chinese command words run on the device, models from the `model`
+# partition in partitions-moji.csv. The first flash of this build must be a full
+# `idf.py flash` (four images + srmodels.bin): `app-flash` and OTA never write the model
+# partition. Turn it off to fall back to the BOOT key alone.
+CONFIG_HG_WAKE_MULTINET=y
+CONFIG_SR_MN_CN_MULTINET5_RECOGNITION_QUANT8=y
+# The words the model listens for (pinyin, lower case, no tones). esp-sr registers these at
+# init from its own Kconfig, so keep them equal to HG_WAKE_CMD0/HG_WAKE_CMD1.
+CONFIG_CN_SPEECH_COMMAND_ID0="ni hao xiao mo"
+CONFIG_CN_SPEECH_COMMAND_ID1="xiao mo xiao mo"
 # The link is the USB cable: SLIP frames on the console port, bridged to the plugin by
 # tools/usb_relay.py. No Wi-Fi session, no IP address, and the console keeps working through
 # the same reader. Comment both lines out to go back to WebSocket-over-Wi-Fi.

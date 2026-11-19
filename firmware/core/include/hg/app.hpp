@@ -155,6 +155,9 @@ class App {
   // times a second from the thread that calls tick().
   void on_motion(int16_t x_mg, int16_t y_mg, int16_t z_mg);
   void on_mic_samples(const int16_t* samples, size_t count);
+  // A command word fired in the port's wake engine (hg/wake.hpp). Logs the score, answers the
+  // host with `wake.hit`, lights the screen and waits for the cue before recording.
+  void on_wake_hit(int command_id, float score);
 
   // --- device features ------------------------------------------------------
   // Sends typed text as a user message (keyboards, simulator, console).
@@ -574,6 +577,13 @@ class App {
   uint32_t pending_look_ms_ = 0;
   uint32_t done_until_ = 0;
   bool was_speaking_ = false;
+  // The wake engine owns the microphone whenever nothing else does. `wake_running_` is what the
+  // app believes, so ownership changes once per transition (update_wake).
+  void update_wake();
+  bool wake_running_ = false;
+  uint32_t wake_hit_at_ = 0;      // the last hit that was acted on, for the 2 s throttle
+  bool wake_awaiting_cue_ = false;  // a hit opened a turn; recording waits for the host's cue
+  uint32_t wake_cue_at_ = 0;      // when a command word last opened a turn
   mascot::Expression expression_now();  // ends it first when its seconds are over
   bool expression_still() const;        // its mark has moved for long enough
   std::string face_command(std::string_view args);

@@ -21,6 +21,13 @@ text screen is offered to the server any more.
   face uses the whole circle instead of the text screens' inscribed square.
 - The board advertises `caps.face: "emoji"` and none of `caps.card`, `caps.choice`,
   `caps.dashboard`, `caps.profiles`, `caps.interpret`: its screen carries no text for them.
+- The wake word is back: MultiNet5 Chinese command words on the device, with the port's
+  `WakeHit` event and one place deciding who holds the microphone. A hit lights the screen,
+  says which word fired (`wake.hit`), greets with the maracas, and starts recording about
+  700 ms later whether the server's cue arrived or not — a missing cue file cannot lock the
+  device up.
+- The resting face rotates among eight calm looks every 20 s while she sits idle, so a still
+  pair of eyes never reads as a frozen screen.
 - The USB Serial/JTAG link is back on top of 0.6: SLIP frames on the console port, the
   console still usable through the same reader, and the interrupt clean-up that 0.6 added to
   its console path is repeated where the link installs the driver (a board that esptool has
@@ -30,6 +37,8 @@ text screen is offered to the server any more.
 
 ### Plugin
 
+- `wake.hit` plays the acknowledgement cue ("我在") through the new `play_cue`, cut by
+  `tools/make_cues.py` into the plugin's data directory: plain audio, no card and no turn.
 - `gadget_face` names a face by `emote`, so the agent can react on a screen that has no room
   for words. It says so in its answer when a text board ignores the message.
 - `gadget_display`, `gadget_ask` and `gadget_interpret` refuse on such a board and tell the

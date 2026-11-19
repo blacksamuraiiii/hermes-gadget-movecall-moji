@@ -2137,6 +2137,51 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
             return SendResult(success=False, error="the gadget is in interpreter mode; try again when it has left it")
         return None
 
+    async def play_cue(self, cue: str) -> bool:
+        """Play one pre-cut cue on the gadget: no card, no turn, no text-to-speech.
+
+        Used for the wake-word acknowledgement ("我在", cut by tools/make_cues.py): the device
+        says which word fired, this plays the file, and the device starts recording only after
+        the cue is over. A missing file is not an error — the device opens the recording anyway
+        — but it is reported once, because the cue is the point.
+        """
+        hub = self._hub
+        if hub is None:
+            return False
+        path = self._status_dir / "cues" / f"{cue}.wav"
+        try:
+            import wave
+
+            with wave.open(str(path), "rb") as wav:
+                rate = wav.getframerate()
+                channels = wav.getnchannels()
+                width = wav.getsampwidth()
+                pcm = wav.readframes(wav.getnframes())
+        except FileNotFoundError:
+            if not getattr(self, "_cue_missing_warned", False):
+                self._cue_missing_warned = True
+                logger.info("no cue at %s: run tools/make_cues.py for the wake-word acknowledgement", path)
+            return False
+        except Exception as exc:  # a broken wav must not break the link
+            logger.warning("could not read the %s cue: %s", cue, exc)
+            return False
+        if channels != 1 or width != 2:
+            logger.warning("the %s cue must be mono PCM16, it is %d channel(s) of %d bytes", cue, channels, width)
+            return False
+        played = False
+        for session in list(hub.sessions.values()):
+            if not session.paired or not session.has_speaker:
+                continue
+            if rate != session.speaker_rate:
+                # make_cues.py cuts at the codec rate; anything else would play at the wrong
+                # pitch, which is worse than a silent cue.
+                logger.debug("the %s cue is %d Hz and %s speaks at %d Hz", cue, rate, session.name,
+                             session.speaker_rate)
+                continue
+            await session.play_pcm(pcm, rate)
+            played = True
+        return played
+
     async def play_tts(self, chat_id: str, audio_path: str, **kwargs) -> SendResult:
         return self._interpret_refusal(chat_id) or await self._play_file(chat_id, audio_path)
 

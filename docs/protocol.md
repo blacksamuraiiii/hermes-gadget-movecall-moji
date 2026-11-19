@@ -476,6 +476,7 @@ fork's, not Adolanium's; a server that does not know them works, it just never n
 | `{"type": "state", "display_sleeping": true}` | The screen went dark (`false`: it lit up); see [Screen sleep](#screen-sleep) |
 | `{"type": "event", "name": "button.long_press", "data": {...}, "notify": false}` | With `notify: true`, the event is delivered to the agent as a message |
 | `{"type": "event", "name": "timer.done", "data": {"label": "Pasta"}, "notify": false}` | The device's timer ran out (the label is empty when none was set). It always has `notify: false`: the alarm is the device's own, and Hermes is not interrupted. Dropped while the device is offline |
+| `{"type": "wake.hit", "command": 0, "score": 91}` | (`moji-emoji-v2`, not upstream) A command word fired on the device's own wake engine: which word, and the model's confidence in percent. The server answers with the acknowledgement audio ("我在"), and the device starts recording about 700 ms after the hit whether that audio arrives or not, so a missing cue never locks it up. Ignored while a turn is open, while a question waits, or with the settings menu up |
 
 ### Firmware updates
 

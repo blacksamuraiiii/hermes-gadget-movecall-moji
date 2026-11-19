@@ -11003,3 +11003,39 @@ TEST("app: an idle pure-emoji board rotates its calm face") {
   r.advance(5000);
   CHECK(r.app.model().look == hg::emoji::Look::Cool);
 }
+
+// The wake word: a hit tells the host which word fired, greets on screen, and only records
+// once the host's cue has had its moment. The cue itself is the host's audio, so the device
+// must not sit waiting for ever if it never comes.
+TEST("app: a wake word asks for the cue, then records hands-free") {
+  hg::DeviceProfile emoji = Rig::profile("ws://hermes.local:8765/gadget");
+  emoji.emoji_face = true;
+  Rig r(emoji);
+  r.bring_online(true);
+  CHECK(!r.app.model().wake_cue);
+  CHECK(!r.fake.mic_on);
+
+  r.app.on_wake_hit(0, 0.91f);
+  const Value* hit = r.fake.last("wake.hit");
+  CHECK(hit != nullptr);
+  if (!hit) return;
+  CHECK_EQ((*hit)["command"].as_int(), int64_t(0));
+  CHECK_EQ((*hit)["score"].as_int(), int64_t(91));
+  // She greets with the maracas, and the screen is lit before any sound arrives.
+  CHECK(r.app.model().wake_cue);
+  // What the glass shows: the cue outranks the resting rotation and the screen.
+  CHECK(hg::emoji_look(r.app.model()) == hg::emoji::Look::Happy);
+  CHECK(r.app.screen() == hg::Screen::Ready);
+  CHECK(!r.fake.mic_on);
+
+  // No cue came: the recording still opens, so a missing cue cannot lock the device up.
+  r.advance(800);
+  CHECK(r.fake.mic_on);
+  CHECK(r.app.screen() == hg::Screen::Listening);
+  CHECK(!r.app.model().wake_cue);
+
+  // A second hit while the turn is open is ignored, not queued.
+  const size_t before = r.fake.sent.size();
+  r.app.on_wake_hit(1, 0.80f);
+  CHECK(r.fake.sent.size() == before);
+}

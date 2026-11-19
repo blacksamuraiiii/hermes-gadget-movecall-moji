@@ -80,6 +80,7 @@ idf_component_register(
         "port_time.cpp"
         "port_touch.cpp"
         "port_wifi.cpp"
+        "port_wake.cpp"
         "port_wifi_setup.cpp"
         "port_ws.cpp"
     INCLUDE_DIRS "." "../../drivers" "${CMAKE_CURRENT_BINARY_DIR}"
