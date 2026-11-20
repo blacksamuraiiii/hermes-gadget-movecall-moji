@@ -169,7 +169,9 @@ class ReminderBridge:
                 self._last = {k: v for k, v in self._last.items() if now - v < 600}
         adapter = _adapter()
         if adapter is None:
-            logger.debug("[Gadget] no gadget adapter in this process; %s reminder dropped", how)
+            # info, not debug: a reminder that never reaches the screen has no other trace, and
+            # the question "why did the board stay dark" is answered here first.
+            logger.info("[Gadget] no gadget adapter in this process; %s reminder dropped", how)
             return
         _announce_now(adapter, spec)
 

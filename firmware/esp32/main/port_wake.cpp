@@ -20,6 +20,7 @@
 #include "esp_mn_iface.h"
 #include "esp_mn_models.h"
 #include "esp_process_sdkconfig.h"  // esp_mn_commands_update_from_sdkconfig: the Kconfig words
+#include "esp_mn_speech_commands.h"  // esp_mn_commands_alloc/clear/add/update: our own two words
 #include "model_path.h"
 
 namespace hgp {
@@ -277,15 +278,27 @@ void wake_attach(hg::AudioIn* mic) {
     wake_release();
     return;
   }
-  // Lower Kconfig value = more sensitive, which is the same direction as the model's probability
-  // threshold. The words themselves come from esp-sr's CN_SPEECH_COMMAND_ID0/1 (set by the
-  // board's sdkconfig.defaults), so changing a wake word needs no code change.
-  // Nothing registers the sdkconfig command words on its own: without this call MultiNet has
-  // zero phrases and never reports a detection, whatever the audio sounds like.
-  esp_mn_error_t* rejected = esp_mn_commands_update_from_sdkconfig(g_mn, g_mn_data);
+  // The words are this board's own Kconfig (CONFIG_HG_WAKE_CMD0/1, pinyin), so changing a wake
+  // word needs no code change. Register those two only: esp-sr's
+  // esp_mn_commands_update_from_sdkconfig() walks every non-empty CONFIG_CN_SPEECH_COMMAND_ID*,
+  // and its Kconfig ships ~150 Mandarin household phrases ("zeng da feng su", "da kai lan ya",
+  // ...). Measured 2026-11-20: the boot log printed 150+ MN_COMMAND lines, so MultiNet had to
+  // tell our two words apart from all of them, and any of their hits (command id >= 2) reached
+  // the app as a wake. Nothing registers a phrase on its own: without a table MultiNet reports
+  // no detection, whatever the audio sounds like.
+  esp_mn_commands_alloc(g_mn, g_mn_data);
+  esp_mn_commands_clear();
+  const char* words[] = {CONFIG_HG_WAKE_CMD0, CONFIG_HG_WAKE_CMD1};
+  for (int i = 0; i < 2; ++i) {
+    if (esp_mn_commands_add(i, words[i]) != ESP_OK) {
+      ESP_LOGW(TAG, "wake word: command %d (%s) rejected by the model", i, words[i]);
+    }
+  }
+  esp_mn_error_t* rejected = esp_mn_commands_update();
   if (rejected && rejected->num > 0) {
     ESP_LOGW(TAG, "wake word: %d command(s) rejected by the model", rejected->num);
   }
+  esp_mn_commands_print();  // the boot log then shows exactly which words run
   ESP_LOGI(TAG, "wake word: %d samples per MultiNet frame", g_mn->get_samp_chunksize(g_mn_data));
 
   // Kconfig gives a percentage: lower is more sensitive, the same direction as the model's

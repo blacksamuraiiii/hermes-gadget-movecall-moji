@@ -2307,6 +2307,7 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
             targets = home or targets
         if not targets:
             return False
+        logger.info("[%s] reminder %s: telling %d device(s)", self.name, cue, len(targets))
         await self.play_cue(cue, skip_emoji=True)
         for session in targets:
             if session.face == "emoji":
@@ -2314,6 +2315,11 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
                 look = notify.look_for(cue)
                 if look:
                     await session.emote(look, ttl_s)
+                    logger.info("[%s] reminder %s: face %s on %s", self.name, cue, look,
+                                session.device_id)
+                else:
+                    logger.warning("[%s] reminder %s has no face; the board stays dark",
+                                   self.name, cue)
                 continue
             head, text = notify.card_text(spec, session.charset) if spec else (title, body)
             if head:
