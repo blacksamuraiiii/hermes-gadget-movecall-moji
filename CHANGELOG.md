@@ -153,11 +153,28 @@ Left out, and why:
 - Reply audio sent as far ahead as the device can hold (upstream `f481640` + `2075171` + `ea205f4`: `caps.speaker.buffer_ms` in the hello, the plugin leading by half of it). The USB serial link has not stuttered a reply with the fixed 0.5 s lead this board uses, and taking it means porting the protocol and the hub by hand. Taken with the next plugin sync if a reply ever stutters.
 - Feeding this board's tuning back upstream (gain, VAD floor, PA and LED pins) waits until the wake-word thresholds are calibrated; the numbers are already written down in `docs/hardware.md` and `notes/硬件-墨迹板参数.md`.
 
-## Unreleased
+## moji-emoji-v2.1 (this fork)
 
+The pure-emoji line's second release on the 0.6.0 tree. The face's priority and mood
+wiring now match what the code implements, reminders speak again without taking the
+screen, and the USB link comes up with the gateway instead of by hand.
+
+- Reminders speak on a pure-emoji board again, and the voice no longer takes the screen:
+  a cue goes out as a `notice` audio stream, so the face keeps the reminder's own look
+  (Silly for an approval, Shocked for a choice, Excited for a finished task) instead of
+  the speaking wave. A finished cue no longer flashes the done face either.
+- The wake answer is v1's Happy (shaking maracas) again, and the recording that follows
+  shows the Listening face — the done cue only lights after a reply's playback now.
+- The wake-word table holds exactly the two words this board listens for
+  (`CONFIG_HG_WAKE_CMD0/1`). esp-sr's own default of ~150 Mandarin household phrases is
+  no longer registered, so MultiNet stops treating "zeng da feng su" as a wake.
+- `platforms.gadget.extra.relay_start` / `relay_stop` work again: 0.6.0's upstream
+  adapter had dropped that code, so a gateway start left the relay down and the board sat
+  on the connecting spinner (2026-11-20). `relay_watch`, off by default, restores a relay
+  that crashed.
 - The emoji face's priority, idle timing and mood wiring now match the code
   (`README_emoji.md`, `notes/设计-小墨纯表情.md`): one chain — link, wake greeting
-  (Hi), reminder (approval Silly / choice Shocked) or done (Excited), reply mood,
+  (Happy), reminder (approval Silly / choice Shocked) or done (Excited), reply mood,
   Speaking, named face, screen; the resting pool is seven looks (Bored is not in
   it), Bored at 140 s idle, Sleeping at 180 s. Replies can wear a mood via a
   `[mood:name]` tag (12 names, `surprised` reads as `shocked`, unknown names are
