@@ -3049,8 +3049,8 @@ void App::update_model() {
   // The board's own face. face.set's four expressions become four of the twenty states, so
   // the AI's named face works on both channels; `emote` adds the other sixteen.
   m.emoji = profile_.emoji_face;
-  // A command word lit the screen and the host is answering with the cue: she says Hi
-  // (eyes grow, then rays) rather than opening the speaking mouth, because that is a greeting.
+  // A command word lit the screen and the host is answering with the cue: she waves the
+  // maracas (Happy) rather than opening the speaking mouth, because that is a greeting.
   m.wake_cue = wake_awaiting_cue_;
   m.done_cue = done_until_ != 0 && static_cast<int32_t>(now() - done_until_) < 0;
   m.look = emoji::Look::Neutral;

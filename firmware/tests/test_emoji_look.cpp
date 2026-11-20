@@ -43,7 +43,7 @@ TEST("emoji look: the wake cue outranks the speaking mouth") {
   UiModel m = model(Screen::Responding);
   m.speaking = true;
   m.wake_cue = true;
-  CHECK(hg::emoji_look(m) == Look::Hi);  // she says Hi, not opens the talking mouth
+  CHECK(hg::emoji_look(m) == Look::Happy);  // she waves the maracas, not opens the talking mouth
 
   m.wake_cue = false;
   CHECK(hg::emoji_look(m) == Look::Speaking);
@@ -54,9 +54,9 @@ TEST("emoji look: the wake cue outranks the speaking mouth") {
 TEST("emoji look: a reply mood beats Speaking, a reminder beats both") {
   UiModel m = model(Screen::Responding);
   m.speaking = true;
-  // The wake cue is a greeting (Hi), not a reply.
+  // The wake cue is a greeting (Happy), not a reply.
   m.wake_cue = true;
-  CHECK(hg::emoji_look(m) == Look::Hi);
+  CHECK(hg::emoji_look(m) == Look::Happy);
   m.wake_cue = false;
   // A reply mood wears its own face while the reply is spoken.
   m.mood_set = true;

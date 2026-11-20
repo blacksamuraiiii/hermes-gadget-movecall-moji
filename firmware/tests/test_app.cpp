@@ -11061,7 +11061,7 @@ TEST("app: a wake word asks for the cue, then records hands-free") {
   // She greets with Hi, and the screen is lit before any sound arrives.
   CHECK(r.app.model().wake_cue);
   // What the glass shows: the cue outranks the resting rotation and the screen.
-  CHECK(hg::emoji_look(r.app.model()) == hg::emoji::Look::Hi);
+  CHECK(hg::emoji_look(r.app.model()) == hg::emoji::Look::Happy);
   CHECK(r.app.screen() == hg::Screen::Ready);
   CHECK(!r.fake.mic_on);
 

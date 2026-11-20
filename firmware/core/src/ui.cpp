@@ -350,9 +350,9 @@ emoji::Look emoji_look(const UiModel& m) {
     case Link::Offline: return emoji::Look::Disconnected;
     case Link::Online: break;
   }
-  // The wake cue is her answering to her name, not reporting a reply: she says Hi
-  // (eyes grow, then rays) instead of opening the speaking mouth (user, 2026-11-09).
-  if (m.wake_cue) return emoji::Look::Hi;
+  // The wake cue is her answering to her name, not reporting a reply: she waves the
+  // maracas instead of opening the speaking mouth (user, 2026-11-20: back to v1's face).
+  if (m.wake_cue) return emoji::Look::Happy;
   // A reminder speaks before the resting face does: the user has to act on it, and on a
   // pure-emoji board this face is the only sign that anything happened. A blocking
   // reminder also beats the reply mood and the speaking mouth — the turn cannot
