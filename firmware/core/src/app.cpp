@@ -2837,10 +2837,12 @@ void App::tick() {
     has_pending_look_ = false;
     update_model();
   }
-  // A turn that just finished playing: the emoji face says "done" for a moment.
+  // A reply that just finished playing: the emoji face says "done" for a moment. Only a reply
+  // counts — a system cue (notice) ends with the mode untouched, and marking that as a finished
+  // turn put the excited face over the listening face right after "我在" (user, 2026-11-20).
   if (profile_.emoji_face) {
     const bool talking = speaking();
-    if (was_speaking_ && !talking) {
+    if (was_speaking_ && !talking && mode_ == Mode::Responding) {
       done_until_ = t + kDoneCueMs;
       update_model();
     }

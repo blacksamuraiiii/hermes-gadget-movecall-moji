@@ -11077,6 +11077,31 @@ TEST("app: a wake word asks for the cue, then records hands-free") {
   CHECK(r.fake.sent.size() == before);
 }
 
+// The greeting cue arrives as a notice stream: it plays without taking the screen, and the
+// recording that follows opens on the listening face — that face is how the user knows the
+// device is hearing them (user, 2026-11-20).
+TEST("app: a notice cue keeps the greeting, then the recording shows the listening face") {
+  hg::DeviceProfile p = Rig::profile("ws://hermes.local:8765/gadget");
+  p.emoji_face = true;
+  Rig r(p);
+  r.bring_online(true);
+  r.app.on_wake_hit(0, 0.92f);
+  r.server(R"({"type":"audio.start","stream":3,"rate":24000,"format":"pcm16","notice":true})");
+  r.advance(100);
+  // A cue is not a reply: the screen stays where it was, and the face is the greeting.
+  CHECK(r.app.screen() == hg::Screen::Ready);
+  CHECK(hg::emoji_look(r.app.model()) == hg::emoji::Look::Happy);
+  CHECK(!r.fake.mic_on);
+  r.server(R"({"type":"audio.end","stream":3})");
+  r.advance(900);
+  CHECK(r.fake.mic_on);
+  CHECK(r.app.screen() == hg::Screen::Listening);
+  CHECK(!r.app.model().wake_cue);
+  CHECK(!r.app.model().look_set);
+  CHECK(!r.app.model().done_cue);
+  CHECK(hg::emoji_look(r.app.model()) == hg::emoji::Look::Listening);
+}
+
 // Cancelling a recording or a reply shows the XX face for a moment, then lets it go.
 TEST("app: cancelling a recording or a reply shows the XX face, then lets it go") {
   hg::DeviceProfile p = Rig::profile("ws://hermes.local:8765/gadget");
