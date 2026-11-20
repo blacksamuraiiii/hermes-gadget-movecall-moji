@@ -198,9 +198,11 @@ class AudioOut:
     the background.
     """
 
-    def __init__(self, session: "DeviceSession", stream: int, src_rate: int, channels: int = 1):
+    def __init__(self, session: "DeviceSession", stream: int, src_rate: int, channels: int = 1,
+                 notice: bool = False):
         self._session = session
         self.stream = stream
+        self.notice = notice  # a system cue, not a reply: the device keeps its own face
         self.rate = session.speaker_rate
         self._lead = getattr(session, "playback_lead_s", PLAYBACK_LEAD_S)
         self._resampler = audio.Resampler(src_rate, self.rate, channels)
@@ -225,9 +227,10 @@ class AudioOut:
         self._played_at = 0.0  # loop time at which the device has played what was sent
 
     async def start(self, *, turn: str | None = None) -> None:
-        _note(self._session, state="speaking")
+        _note(self._session, state="speaking" if not self.notice else "reminder")
         await self._session.send_json(
-            protocol.message("audio.start", stream=self.stream, rate=self.rate, format=self.format, turn=turn))
+            protocol.message("audio.start", stream=self.stream, rate=self.rate, format=self.format,
+                             turn=turn, notice=True if self.notice else None))
         self._task = asyncio.create_task(self._pump())
 
     def write(self, pcm: bytes) -> None:
@@ -975,11 +978,16 @@ class DeviceSession:
         self._stream_counter = self._stream_counter % 250 + 1
         return self._stream_counter
 
-    async def open_audio(self, src_rate: int, channels: int = 1, *, turn: str | None = None) -> AudioOut:
-        """Start a new outbound audio stream, replacing any that is playing."""
+    async def open_audio(self, src_rate: int, channels: int = 1, *, turn: str | None = None,
+                         notice: bool = False) -> AudioOut:
+        """Start a new outbound audio stream, replacing any that is playing.
+
+        ``notice`` marks a system cue (a reminder's voice): the device plays it without taking
+        its screen into Responding, so the face keeps the look the reminder gave it.
+        """
         if self._audio_out and not self._audio_out.done.is_set():
             await self._audio_out.abort()
-        out = AudioOut(self, self._next_stream(), src_rate, channels)
+        out = AudioOut(self, self._next_stream(), src_rate, channels, notice=notice)
         self._audio_out = out
         try:
             await out.start(turn=turn)
@@ -990,8 +998,9 @@ class DeviceSession:
             raise
         return out
 
-    async def play_pcm(self, pcm: bytes, rate: int, *, turn: str | None = None) -> AudioOut:
-        out = await self.open_audio(rate, turn=turn)
+    async def play_pcm(self, pcm: bytes, rate: int, *, turn: str | None = None,
+                       notice: bool = False) -> AudioOut:
+        out = await self.open_audio(rate, turn=turn, notice=notice)
         out.write(pcm)
         out.finish()
         return out

@@ -897,6 +897,9 @@ class App {
   std::vector<int16_t> pcm_buf_;
   int in_stream_ = -1;
   bool in_decoded_ = false;  // the current speaker stream arrives compressed (hal_.speaker_decoder)
+  // The current stream is a system cue (a reminder's voice), not a reply: it plays without
+  // taking the screen into Responding, so the face keeps its own look (see h_audio_start).
+  bool notice_stream_ = false;
   uint32_t in_rate_ = 0;     // the current speaker stream's sample rate
   uint32_t id_counter_ = 0;
 

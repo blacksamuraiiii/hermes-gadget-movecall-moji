@@ -1378,6 +1378,11 @@ void App::h_audio_start(const json::Value& m) {
   in_decoded_ = decoded;
   in_rate_ = rate;
   last_turn_rx_ = now();
+  // A system cue (a reminder's voice, see plugin/notify.py) is not a reply: it must not put the
+  // screen into Responding, or the face would be the generic speaking wave while the reminder's
+  // own face is what the room should see. The speaker still plays it, and the screen is lit.
+  notice_stream_ = m["notice"].as_bool();
+  if (notice_stream_) return;
   status_.clear();  // audible reply: the working-state phrase is over
   turn_takes_screen();
   if (mode_ != Mode::Responding) {
@@ -1390,6 +1395,7 @@ void App::h_audio_end(const json::Value& m) {
   if (in_stream_ < 0 || m["stream"].as_int(-1) != in_stream_) return;
   hal_.speaker->end();
   in_stream_ = -1;
+  notice_stream_ = false;
 }
 
 void App::h_audio_abort(const json::Value& m) {
@@ -2823,8 +2829,9 @@ void App::h_ota_abort(const json::Value&) {
 void App::tick() {
   const uint32_t t = now();
   // A face the host named while she was speaking waits for the playback to end, then takes
-  // its full time (h_emote): the mouth has to match the sound.
-  if (has_pending_look_ && !speaking()) {
+  // its full time (h_emote): the mouth has to match the sound. A system cue is not that: the
+  // reminder's own face must show while its voice plays, so only a reply's playback holds it.
+  if (has_pending_look_ && !(mode_ == Mode::Responding && speaking())) {
     named_look_ = pending_look_;
     named_look_until_ = t + pending_look_ms_;
     has_pending_look_ = false;

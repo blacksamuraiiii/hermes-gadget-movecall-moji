@@ -2270,7 +2270,7 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
                 logger.debug("the %s cue is %d Hz and %s speaks at %d Hz", cue, rate, session.name,
                              session.speaker_rate)
                 continue
-            await session.play_pcm(pcm, rate)
+            await session.play_pcm(pcm, rate, notice=True)
             played = True
         return played
 

@@ -68,7 +68,9 @@
   绑完成 → 兴奋（星星眼）＋「任务已完成」
 
 cue 文案在 `tools/make_cues.py`，按 24 kHz 单声道 PCM16 切；改文案后重跑
-`hpy tools/make_cues.py --force`。2026-11-20 前纯表情板只出脸不出声，已改回两者都有。
+`hpy tools/make_cues.py --force`。2026-11-20 前纯表情板只出脸不出声，已改回两者都有：
+提示音走 `audio.start` 的 `notice` 标记，固件不当它是回复，播放时屏幕仍是提醒那张脸，
+不会切成播报的声波脸。
 
 ## 四、AI 挑表情（已接）
 
