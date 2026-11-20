@@ -84,6 +84,7 @@ PAIRING_POLL_S = 2.0
 THUMB_HOLD_S = 1.5
 PAIRING_GRACE_S = 6.0
 UPDATE_POLL_S = 3.0           # how often staged firmware ('hermes gadget update') is looked for
+RELAY_WATCH_S = 120.0         # how often the configured USB relay is checked and restarted
 DASHBOARD_POLL_S = 2.0        # how often tiles ('hermes gadget tile') and expiries are looked at
 DASHBOARD_SETTLE_S = 0.3      # session changes this close together go out as one dashboard
 DESK_POLL_S = 0.4             # how often the Desktop page's request inbox is checked
@@ -275,6 +276,16 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
         # hooks are never attached, and without this line the profile's settings are ignored.
         self._reminders_on = _flag(extra.get("reminders"), True)
         self._reminder_min_turn_s = float(extra.get("reminder_min_turn_s") or notify.MIN_TURN_S)
+        # Windows-only convenience: run a relay start command with the gateway and a stop
+        # command when it goes away, so the device's USB link lives as long as Hermes does.
+        # Empty = manage the relay yourself (tools/relay.sh).
+        self._relay_start_cmd = str(extra.get("relay_start") or "").strip()
+        self._relay_stop_cmd = str(extra.get("relay_stop") or "").strip()
+        # Off by default: a restart every two minutes resets the board (opening COM5 pulls
+        # DTR), which fights a flash or a console command. Turn it on to have a crashed
+        # relay come back by itself.
+        self._relay_watch_on = _flag(extra.get("relay_watch"), False)
+        self._relay_task: Optional[asyncio.Task] = None
         self._profile_faces = _flag(extra.get("profile_faces"), True)
         self._convert_avatars: Optional[bool] = None  # Pillow present; asked once
         # Profile switching: off without the key; "all" offers every served profile; a list offers those.
@@ -340,6 +351,66 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
 
     # -- lifecycle ------------------------------------------------------------------
 
+    def _relay_hook_cmd(self, which: str) -> str:
+        return self._relay_start_cmd if which == "start" else self._relay_stop_cmd
+
+    async def run_relay_hook(self, which: str, *, quiet: bool = False) -> tuple[str, int]:
+        """Run the configured relay command. The exit code is the contract: 0 means the
+        relay is up (started now or already running). Output is only for the log."""
+        cmd = self._relay_hook_cmd(which)
+        if not cmd:
+            return "", 0
+        # start_new_session: a gateway shutdown signals its own process group, and a console
+        # command in that group dies before it can stop the relay (observed as "exit -2").
+        proc = await asyncio.create_subprocess_shell(
+            cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True)
+        out, _ = await proc.communicate()
+        code = proc.returncode if proc.returncode is not None else -1
+        text = (out or b"").decode("utf-8", "replace").strip()
+        first = text.splitlines()[0] if text else f"exit {code}"
+        if not quiet:
+            logger.info("[%s] relay %s (exit %s): %s", self.name, which, code, first)
+        return text, code
+
+    async def start_relay_if_configured(self, *, quiet: bool = False) -> bool:
+        """Bring the USB relay up with the gateway (Windows host; see extras relay_start)."""
+        if not self._relay_start_cmd:
+            return False
+        try:
+            text, code = await self.run_relay_hook("start", quiet=quiet)
+        except Exception as exc:  # a missing relay must not take the platform down
+            logger.warning("[%s] could not start the relay: %s", self.name, exc)
+            return False
+        if code != 0:
+            logger.warning("[%s] relay start failed (exit %s): %s", self.name, code, text)
+        return code == 0
+
+    async def stop_relay_if_configured(self) -> None:
+        """Stop the relay on shutdown: it exists only for this gateway (see extras relay_stop).
+
+        Best effort: the gateway shuts down while /mnt/c may already be gone, and the hook then
+        fails with "powershell.exe: not found". That is expected on this machine, so the failure
+        is a debug line, not a warning someone has to read every time they power off.
+        """
+        if not self._relay_stop_cmd:
+            return
+        try:
+            await self.run_relay_hook("stop")
+        except Exception as exc:
+            logger.debug("[%s] could not stop the relay (best effort): %s", self.name, exc)
+
+    async def _watch_relay(self) -> None:
+        """Keep the relay alive: a crashed relay, a pulled cable or a USB re-enumeration
+        otherwise leaves the device offline until someone notices by hand."""
+        up: Optional[bool] = None
+        while True:
+            await asyncio.sleep(RELAY_WATCH_S)
+            ok = await self.start_relay_if_configured(quiet=True)
+            if ok != up:
+                logger.info("[%s] relay watchdog: %s", self.name, "running" if ok else "not running")
+                up = ok
+
     def _ssl_context(self) -> Optional[ssl.SSLContext]:
         if not self._tls_cert:
             return None
@@ -372,6 +443,11 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
             self._set_fatal_error(
                 "gadget_listen_failed", f"Cannot listen on {self._host}:{self._port}: {exc}", retryable=True)
             return False
+        # The USB relay dials back into this port, so it starts once we are listening.
+        await self.start_relay_if_configured()
+        if self._relay_watch_on and self._relay_start_cmd and (
+                self._relay_task is None or self._relay_task.done()):
+            self._relay_task = asyncio.create_task(self._watch_relay())
         self._loop = asyncio.get_running_loop()
         self._registry_key = getattr(self, "_owner_profile", None) or "default"
         runtime.register(self._registry_key, self)
@@ -397,13 +473,16 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
         for unsubscribe in self._boards.values():
             unsubscribe()
         self._boards.clear()
-        for task in (self._watch_task, self._update_task, self._dashboard_task, self._status_task, self._desk_task):
+        for task in (self._watch_task, self._update_task, self._dashboard_task, self._status_task,
+                     self._desk_task, self._relay_task):
             if task:
                 task.cancel()
-        self._watch_task = self._update_task = self._dashboard_task = self._status_task = self._desk_task = None
+        self._watch_task = self._update_task = self._dashboard_task = self._status_task = \
+            self._desk_task = self._relay_task = None
         if self._hub:
             await self._hub.stop()
             self._hub = None
+        await self.stop_relay_if_configured()
         if self._status_dir is not None:
             self._write_status({}, running=False)  # stopped on purpose: no device is online
         self._pushed_seq.clear()  # after the stop: a push still finishing while it ran may add one

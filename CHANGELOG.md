@@ -166,9 +166,11 @@ Left out, and why:
   T mouth at y=139, heart s=20), Speaking is a fixed 20-frame wave, and the
   connecting GIF finally spins — the dump draws the ring with `Ui::draw_emoji`'s
   geometry. Five GIFs changed in content (connecting, sleeping, loving, silly,
-  thinking); the other fifteen are pixel-identical re-encodes. Known gap: the
-  empty-reply → embarrassed fallback is not wired in this tree (the tool-token
-  stripping it hung on did not survive the rebase). Font tests are skipped in
+  thinking); the other fifteen are pixel-identical re-encodes. A finalized reply
+  that is empty or blank gets `这条回复是空的，请再问一次。` with the silly face
+  (`tools.empty_reply_fallback`, applied in `adapter._send_reply`); a reply that
+  is only tool markers is not caught, because the new formatter does not strip
+  them. Font tests are skipped in
   moji's test runs (a textless board has no CJK font); the font code stays in the
   shared core library.
 
