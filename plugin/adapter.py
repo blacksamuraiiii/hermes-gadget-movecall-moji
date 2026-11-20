@@ -2229,7 +2229,7 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
             return SendResult(success=False, error="the gadget is in interpreter mode; try again when it has left it")
         return None
 
-    async def play_cue(self, cue: str, *, skip_emoji: bool = False) -> bool:
+    async def play_cue(self, cue: str) -> bool:
         """Play one pre-cut cue on the gadget: no card, no turn, no text-to-speech.
 
         Used for the wake-word acknowledgement ("我在", cut by tools/make_cues.py): the device
@@ -2264,8 +2264,6 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
         for session in list(hub.sessions.values()):
             if not session.paired or not session.has_speaker:
                 continue
-            if skip_emoji and session.face == "emoji":
-                continue  # its reminder is the face, not a voice
             if rate != session.speaker_rate:
                 # make_cues.py cuts at the codec rate; anything else would play at the wrong
                 # pitch, which is worse than a silent cue.
@@ -2295,8 +2293,9 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
 
         Called from a plugin hook on the agent thread: the cue is a file cut once by
         tools/make_cues.py, so a reminder costs no tokens and no text-to-speech. Audio comes
-        first because playing it lights a sleeping screen. A pure-emoji board has no text to
-        draw, so it gets the cue alone.
+        first because playing it lights a sleeping screen. A pure-emoji board gets both the cue
+        and the face: the voice says what happened ("任务已完成" / "需要你做一个选择") and the
+        face shows it, which is what the board had before it went emoji-only (user, 2026-11-20).
         """
         hub = self._hub
         if hub is None:
@@ -2308,10 +2307,10 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
         if not targets:
             return False
         logger.info("[%s] reminder %s: telling %d device(s)", self.name, cue, len(targets))
-        await self.play_cue(cue, skip_emoji=True)
+        await self.play_cue(cue)
         for session in targets:
             if session.face == "emoji":
-                # No text to draw and no voice to leave hanging: the face is the reminder.
+                # The cue says it aloud; the face is the same news on a screen with no text.
                 look = notify.look_for(cue)
                 if look:
                     await session.emote(look, ttl_s)
